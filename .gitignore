@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.python-version
+
+# uv
+uv.lock
+
+# Node / Vite
+node_modules/
+gui/dist/
+gui/.vite/
+.npm/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Project data — clips, model weights, outputs
+data/*
+!data/README.md
+weights/
+checkpoints/
+runs/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db

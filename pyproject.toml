@@ -1,0 +1,65 @@
+[project]
+name = "moderncv"
+version = "0.1.0"
+description = "Modern CV pipeline: DINOv3 + SAM2 + YOLO + ByteTrack on soccer footage, in a node-graph GUI."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Apple-Silicon-aware. Torch 2.x has MPS support out of the box on macOS arm64.
+# SAM2 and DINOv3 are typically installed from git or a vendor wheel — see
+# the comment block below for those steps.
+dependencies = [
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "ultralytics>=8.3.0",        # YOLOv8/v11
+    "opencv-python>=4.10.0",
+    "pillow>=10.4.0",
+    "numpy>=1.26,<2.0",          # 2.x compatibility still uneven across CV libs
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.8.0",
+    "scipy>=1.13.0",             # for trackers / Hungarian
+    "filterpy>=1.4.5",           # Kalman filter, used by ByteTrack/BoT-SORT
+    "scikit-learn>=1.5.0",       # KMeans for team clustering
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6.0",
+    "mypy>=1.10",
+    "ipykernel>=6.29",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*", "server*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+# ---------------------------------------------------------------------------
+# Models that are not on PyPI yet (or whose PyPI version lags). Install after
+# the base deps:
+#
+#   # SAM2 (Meta)
+#   pip install "git+https://github.com/facebookresearch/sam2.git"
+#
+#   # DINOv3 (Meta) — released via the dinov2/dinov3 repos. As of writing,
+#   # the cleanest path is:
+#   pip install "git+https://github.com/facebookresearch/dinov3.git"
+#   # (Or load via timm once an official entry lands; check before pinning.)
+#
+#   # ByteTrack reference impl (optional; a small in-tree version is cheap
+#   # to maintain and avoids the heavy YOLOX dep):
+#   # — we'll ship our own tracker module rather than vendor ByteTrack.
+# ---------------------------------------------------------------------------
