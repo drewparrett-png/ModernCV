@@ -54,3 +54,9 @@ export interface BlockNodeData {
   impl: string;
   params: Record<string, unknown>;
 }
+
+export interface VideosResponse {
+  videos: string[];
+  data_dir: string;
+  count: number;
+}

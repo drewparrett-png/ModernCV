@@ -10,6 +10,8 @@ Endpoints:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,6 +23,9 @@ from server.schemas import (
     BlocksResponse,
     RunRequest,
 )
+
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+DATA_DIR = Path("data")
 
 app = FastAPI(title="ModernCV", version="0.1.0")
 
@@ -36,6 +41,24 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/videos")
+def videos() -> dict:
+    """List video files in data/ — used by the InputNode dropdown.
+
+    Paths are returned relative to the project root so they can be passed
+    straight to the OpenCV reader as-is. Sorted alphabetically; nested
+    directories (e.g. data/dfl/clip_001.mp4) are walked recursively.
+    """
+    if not DATA_DIR.exists():
+        return {"videos": [], "data_dir": str(DATA_DIR.resolve()), "count": 0}
+    found = sorted(
+        str(p)
+        for p in DATA_DIR.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+    return {"videos": found, "data_dir": str(DATA_DIR.resolve()), "count": len(found)}
 
 
 @app.get("/blocks", response_model=BlocksResponse)

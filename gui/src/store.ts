@@ -10,7 +10,7 @@ import {
   type NodeChange,
 } from "reactflow";
 
-import { fetchBlocks, runGraph } from "./api";
+import { fetchBlocks, fetchVideos, runGraph } from "./api";
 import { seedEdges, seedNodes } from "./seed";
 import type {
   BlockKind,
@@ -21,12 +21,15 @@ import type {
 
 interface State {
   blocks: Record<string, string[]>;
+  videos: string[];
+  dataDir: string;
   nodes: Node<BlockNodeData>[];
   edges: Edge[];
   runResult: RunResponse | null;
   runError: string | null;
   running: boolean;
   loadBlocks: () => Promise<void>;
+  loadVideos: () => Promise<void>;
   setImpl: (nodeId: string, impl: string) => void;
   setParam: (nodeId: string, key: string, value: unknown) => void;
   onNodesChange: (changes: NodeChange[]) => void;
@@ -47,6 +50,8 @@ function patchNodeData(
 
 export const useStore = create<State>((set, get) => ({
   blocks: {},
+  videos: [],
+  dataDir: "",
   nodes: seedNodes(),
   edges: seedEdges(),
   runResult: null,
@@ -58,6 +63,11 @@ export const useStore = create<State>((set, get) => ({
     const blocks: Record<string, string[]> = {};
     for (const b of resp.blocks) blocks[b.kind] = b.impls;
     set({ blocks });
+  },
+
+  async loadVideos() {
+    const resp = await fetchVideos();
+    set({ videos: resp.videos, dataDir: resp.data_dir });
   },
 
   setImpl(nodeId, impl) {

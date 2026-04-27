@@ -1,10 +1,21 @@
-import type { BlocksResponse, GraphSpec, RunResponse } from "./types";
+import type {
+  BlocksResponse,
+  GraphSpec,
+  RunResponse,
+  VideosResponse,
+} from "./types";
 
 const API_BASE = "http://localhost:8000";
 
 export async function fetchBlocks(): Promise<BlocksResponse> {
   const res = await fetch(`${API_BASE}/blocks`);
   if (!res.ok) throw new Error(`GET /blocks: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchVideos(): Promise<VideosResponse> {
+  const res = await fetch(`${API_BASE}/videos`);
+  if (!res.ok) throw new Error(`GET /videos: ${res.status}`);
   return res.json();
 }
 

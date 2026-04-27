@@ -6,10 +6,12 @@ import { useStore } from "./store";
 
 export default function App() {
   const loadBlocks = useStore((s) => s.loadBlocks);
+  const loadVideos = useStore((s) => s.loadVideos);
 
   useEffect(() => {
     loadBlocks().catch((err) => console.error("loadBlocks failed", err));
-  }, [loadBlocks]);
+    loadVideos().catch((err) => console.error("loadVideos failed", err));
+  }, [loadBlocks, loadVideos]);
 
   return (
     <div className="app">
