@@ -8,6 +8,7 @@ import type {
   PreviewBucketsRequest,
   PreviewBucketsResponse,
   RunDetail,
+  RunManifest,
   RunResponse,
   RunsResponse,
   StudentDetail,
@@ -122,6 +123,38 @@ export async function toggleRejection(
   if (!res.ok) throw new Error(`POST .../toggle: ${res.status}`);
   const body = (await res.json()) as { rejections: RejectionMap };
   return body.rejections;
+}
+
+/** Mark a completed Teacher dataset as approved-as-ground-truth.
+ *  Idempotent: a second call against an already-approved run returns
+ *  the same manifest (the timestamp does not drift). 400 if status is
+ *  not "completed"; 404 if the run id is unknown. */
+export async function approveRun(id: string): Promise<RunManifest> {
+  const res = await fetch(
+    `${API_BASE}/runs/${encodeURIComponent(id)}/approve`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST /runs/${id}/approve: ${res.status} ${text}`);
+  }
+  const body = (await res.json()) as { manifest: RunManifest };
+  return body.manifest;
+}
+
+/** Reverse of `approveRun`. Quiet no-op (200 + unchanged manifest) when
+ *  the run isn't currently approved. */
+export async function unapproveRun(id: string): Promise<RunManifest> {
+  const res = await fetch(
+    `${API_BASE}/runs/${encodeURIComponent(id)}/unapprove`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST /runs/${id}/unapprove: ${res.status} ${text}`);
+  }
+  const body = (await res.json()) as { manifest: RunManifest };
+  return body.manifest;
 }
 
 export async function deleteRun(id: string): Promise<void> {

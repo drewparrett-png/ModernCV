@@ -14,6 +14,7 @@ import { useMemo, useState, type KeyboardEvent } from "react";
 import { useStore } from "../store";
 import type { RunDetail, RunProgress, Task } from "../types";
 import { runOverlayUrl } from "../api";
+import { ReviewStatusPill } from "../components/ReviewStatusPill";
 import { VideoTreePicker } from "../components/VideoTreePicker";
 
 const TASK_DESCRIPTIONS: Record<Task, string> = {
@@ -279,6 +280,16 @@ function TeacherRowHeader({
         <span className={`status-pill status-${manifest.status}`}>
           {manifest.status}
         </span>
+        {/* Review-status pill — only meaningful once the run is
+            completed (a still-running Teacher has nothing to review).
+            Hide it for non-terminal states to keep the sidebar quiet. */}
+        {manifest.status === "completed" && (
+          <ReviewStatusPill
+            status={manifest.review_status}
+            approvedAt={manifest.approved_at}
+            compact
+          />
+        )}
         <span className="teacher-row-time mono">
           {manifest.started_at.replace("T", " ").replace("Z", "")}
         </span>

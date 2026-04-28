@@ -11,6 +11,7 @@ import {
 } from "reactflow";
 
 import {
+  approveRun as apiApproveRun,
   deleteRun as apiDeleteRun,
   deleteStudent as apiDeleteStudent,
   fetchArchitectures,
@@ -24,6 +25,7 @@ import {
   runGraph,
   runLearn,
   runOptimize,
+  unapproveRun as apiUnapproveRun,
 } from "./api";
 import { seedEdges, seedNodes } from "./seed";
 import type {
@@ -108,6 +110,15 @@ interface State {
   loadTeachers: () => Promise<void>;
   startLearn: () => Promise<string | null>;
   deleteTeacher: (id: string) => Promise<void>;
+  /** Approve / un-approve the dataset behind a Teacher run.
+   *  Both actions are optimistic: the local manifest flips immediately so
+   *  the pill reacts without waiting for the server, and the previous
+   *  manifest is restored if the server call fails. The single
+   *  `teacherDetails` mutation is what makes Phase 1's pill update across
+   *  Learn sidebar, Optimize selectors, and Run Inspector with one
+   *  store write. */
+  approveTeacher: (id: string) => Promise<void>;
+  unapproveTeacher: (id: string) => Promise<void>;
 
   // Optimize (Students) — multi-run
   optimizeError: string | null;
@@ -365,6 +376,79 @@ export const useStore = create<State>((set, get) => ({
       _startTeacherPoll(initial.manifest.id);
     }
     return initial.manifest.id;
+  },
+
+  async approveTeacher(id) {
+    const prev = get().teacherDetails[id];
+    if (!prev) return;
+    // Optimistic flip: stamp `approved_at` locally so the pill updates
+    // before the network call returns. We mirror the server's "approved"
+    // derivation rule (approved_at != null → review_status="approved")
+    // so the UI's intermediate state matches what the server will send
+    // back. If the call fails, we restore the previous detail wholesale.
+    const optimistic = {
+      ...prev,
+      manifest: {
+        ...prev.manifest,
+        approved_at: new Date().toISOString(),
+        review_status: "approved" as const,
+      },
+    };
+    set({
+      teacherDetails: { ...get().teacherDetails, [id]: optimistic },
+    });
+    try {
+      const updated = await apiApproveRun(id);
+      set({
+        teacherDetails: {
+          ...get().teacherDetails,
+          [id]: { ...optimistic, manifest: updated },
+        },
+      });
+    } catch (e) {
+      console.error("approve failed", e);
+      set({
+        teacherDetails: { ...get().teacherDetails, [id]: prev },
+      });
+      throw e;
+    }
+  },
+
+  async unapproveTeacher(id) {
+    const prev = get().teacherDetails[id];
+    if (!prev) return;
+    // Optimistic clear. We can't compute the exact "reviewed" vs
+    // "unreviewed" fallback locally without inspecting the rejection
+    // file, but the server is going to return the right status — assume
+    // "unreviewed" optimistically and let the server response correct it
+    // if the dataset has rejections (cheap correction; the real source
+    // of truth is one HTTP RTT away).
+    const optimistic = {
+      ...prev,
+      manifest: {
+        ...prev.manifest,
+        approved_at: null,
+        review_status: "unreviewed" as const,
+      },
+    };
+    set({
+      teacherDetails: { ...get().teacherDetails, [id]: optimistic },
+    });
+    try {
+      const updated = await apiUnapproveRun(id);
+      set({
+        teacherDetails: {
+          ...get().teacherDetails,
+          [id]: { ...optimistic, manifest: updated },
+        },
+      });
+    } catch (e) {
+      console.error("unapprove failed", e);
+      set({
+        teacherDetails: { ...get().teacherDetails, [id]: prev },
+      });
+      throw e;
+    }
   },
 
   async deleteTeacher(id) {

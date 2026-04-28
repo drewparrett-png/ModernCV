@@ -92,6 +92,11 @@ export interface LearnRequest {
   full_resolution?: boolean;
 }
 
+/** Three-state human-review summary on a Teacher dataset. Derived
+ *  server-side from `approved_at` + the rejection file; surfaces in the
+ *  ReviewStatusPill across Learn, Optimize, and Run Inspector. */
+export type ReviewStatus = "unreviewed" | "reviewed" | "approved";
+
 export interface RunManifest {
   id: string;
   task: Task;
@@ -104,6 +109,15 @@ export interface RunManifest {
   status: "queued" | "running" | "completed" | "failed";
   models: Record<string, string>;
   error: string | null;
+  /** ISO 8601 UTC timestamp set when the run was approved as ground truth
+   *  via /runs/:id/approve. `null` means not approved (review_status is
+   *  then derived from rejection presence). Defaults `null` so legacy
+   *  manifests on disk keep loading unchanged. */
+  approved_at: string | null;
+  /** Derived on the wire by RunManifestModel.review_status — kept on the
+   *  type so components don't have to recompute it. The server is the
+   *  source of truth. */
+  review_status: ReviewStatus;
 }
 
 export interface PerClassStats {

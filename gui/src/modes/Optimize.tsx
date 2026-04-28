@@ -35,6 +35,9 @@ import type {
   Task,
 } from "../types";
 import { Compare } from "./Compare";
+// NOTE: ReviewStatusPill is currently unused here. The stashed WIP added
+// the import in anticipation of surfacing review status in this panel
+// alongside Learn — left as a TODO for when the review-pill feature lands.
 
 // Confidence-band defaults — keep in lockstep with `OptimizeRequest`'s
 // backend defaults (`server/schemas.py`) so the form's initial submission
