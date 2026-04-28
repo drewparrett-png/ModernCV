@@ -6,7 +6,7 @@
  * below.
  *
  *   3.1  side-by-side details table, sortable, best-per-column highlight
- *   3.2  per-eval-teacher mAP matrix (next commit)
+ *   3.2  per-eval-teacher mAP matrix, with optional shared-only filter
  *   3.3  Pareto plot (next commit)
  *   3.4  comparability badges (next commit)
  *
@@ -18,7 +18,13 @@ import { useMemo, useState } from "react";
 
 import { useStore } from "../store";
 import type { RunDetail, StudentDetail, StudentStats } from "../types";
-import { bestPerColumn, type CompareColumn } from "../lib/compare";
+import {
+  bestPerColumn,
+  evalTeacherMatrix,
+  mapColourClass,
+  sharedEvalTeachers,
+  type CompareColumn,
+} from "../lib/compare";
 
 // ---- Column definitions for the details table --------------------------
 
@@ -102,6 +108,8 @@ function formatSeconds(s: number): string {
 
 export function Compare({
   studentDetails,
+  teacherDetails,
+  onInspectTeacher,
 }: {
   studentDetails: Record<string, StudentDetail>;
   teacherDetails: Record<string, RunDetail>;
@@ -153,7 +161,11 @@ export function Compare({
           Pick at least 2 completed Students to compare.
         </div>
       ) : (
-        <CompareBody selected={selected} />
+        <CompareBody
+          selected={selected}
+          teacherDetails={teacherDetails}
+          onInspectTeacher={onInspectTeacher}
+        />
       )}
     </div>
   );
@@ -230,9 +242,17 @@ function CompareSelector({
   );
 }
 
-// ---- Body (3.1 details table — more sections appended in subsequent commits)
+// ---- Body (3.1 details table + 3.2 matrix; more sections appended later)
 
-function CompareBody({ selected }: { selected: StudentDetail[] }) {
+function CompareBody({
+  selected,
+  teacherDetails,
+  onInspectTeacher,
+}: {
+  selected: StudentDetail[];
+  teacherDetails: Record<string, RunDetail>;
+  onInspectTeacher: (id: string) => void;
+}) {
   const studentsForHelpers = useMemo(
     () =>
       selected.map((d) => ({
@@ -245,6 +265,12 @@ function CompareBody({ selected }: { selected: StudentDetail[] }) {
   return (
     <div className="compare-body">
       <DetailsTable selected={selected} students={studentsForHelpers} />
+      <EvalTeacherMatrixView
+        students={studentsForHelpers}
+        selected={selected}
+        teacherDetails={teacherDetails}
+        onInspectTeacher={onInspectTeacher}
+      />
     </div>
   );
 }
@@ -352,6 +378,116 @@ function DetailsTable({
             })}
           </tbody>
         </table>
+      </div>
+    </section>
+  );
+}
+
+// ---- 3.2 Per-eval-teacher matrix ---------------------------------------
+
+function EvalTeacherMatrixView({
+  students,
+  selected,
+  teacherDetails,
+  onInspectTeacher,
+}: {
+  students: { id: string; stats: StudentStats }[];
+  selected: StudentDetail[];
+  teacherDetails: Record<string, RunDetail>;
+  onInspectTeacher: (id: string) => void;
+}) {
+  const [sharedOnly, setSharedOnly] = useState(false);
+  const fullMatrix = useMemo(() => evalTeacherMatrix(students), [students]);
+  const matrix = sharedOnly ? sharedEvalTeachers(fullMatrix) : fullMatrix;
+
+  // Map student id → display label (prompt) for the header.
+  const studentLabel = (id: string): string => {
+    const d = selected.find((x) => x.manifest.id === id);
+    return d?.manifest.prompt ?? id;
+  };
+
+  if (fullMatrix.teacherIds.length === 0) {
+    return (
+      <section className="compare-section">
+        <h3>Per-eval-teacher mAP@0.5</h3>
+        <div className="compare-empty-inline">
+          None of the selected Students have eval teachers.
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="compare-section">
+      <header className="compare-section-head">
+        <h3>Per-eval-teacher mAP@0.5</h3>
+        <label className="compare-toggle">
+          <input
+            type="checkbox"
+            checked={sharedOnly}
+            onChange={(e) => setSharedOnly(e.target.checked)}
+          />
+          Filter to shared eval teachers
+        </label>
+      </header>
+      <div className="compare-table-wrap">
+        <table className="compare-table compare-matrix-table">
+          <thead>
+            <tr>
+              <th>Eval teacher</th>
+              {matrix.studentIds.map((sid) => (
+                <th key={sid}>{studentLabel(sid)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.teacherIds.map((tid) => {
+              const tDet = teacherDetails[tid];
+              const tLabel = tDet?.manifest.prompt ?? tid.replace("teacher_", "");
+              return (
+                <tr key={tid}>
+                  <td>
+                    <button
+                      type="button"
+                      className="teacher-chip"
+                      title={`Inspect ${tid}`}
+                      onClick={() => onInspectTeacher(tid)}
+                    >
+                      {tLabel}
+                    </button>
+                  </td>
+                  {matrix.studentIds.map((sid) => {
+                    const cell = matrix.cells[tid]?.[sid];
+                    if (!cell || cell.map50 == null) {
+                      return (
+                        <td
+                          key={sid}
+                          className="compare-cell-missing"
+                          title="This Student didn't include this teacher in its eval set — no comparable score."
+                        >
+                          —
+                        </td>
+                      );
+                    }
+                    return (
+                      <td
+                        key={sid}
+                        className={`compare-td-num ${mapColourClass(cell.map50)}`}
+                      >
+                        {cell.map50.toFixed(3)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {sharedOnly && matrix.teacherIds.length === 0 && (
+          <div className="compare-empty-inline">
+            No teachers in common across the selected Students.
+          </div>
+        )}
       </div>
     </section>
   );
