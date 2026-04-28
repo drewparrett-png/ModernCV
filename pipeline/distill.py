@@ -1,20 +1,35 @@
-"""Knowledge distillation: turn Teacher COCO labels into a trained Student.
+"""Knowledge-distillation data preparation (Phase 1.2 shim).
 
-This module owns the actual trainer — frame extraction, COCO→YOLO
-conversion, Ultralytics training, per-eval-teacher mAP, and inference
-timing. `pipeline.optimize` is the queue/orchestration layer that calls
-in here from a worker thread; this file is pure mechanics, no I/O on
-manifest/progress files.
+What lives here now
+-------------------
+The architecture-agnostic *data* side of distillation:
 
-Why this lives in its own module
---------------------------------
-The trainer is the heaviest piece of the project — heavy in deps
-(torch + ultralytics + cv2 frame extraction), heavy in side-effects (it
-materialises ~hundreds of JPGs on disk and a YOLO checkpoint), and heavy
-in failure modes (CUDA/MPS device picking, Ultralytics version drift,
-COCO category-id remapping). Keeping it isolated from the queue/orchestration
-in `optimize.py` makes it testable in a notebook without spinning up the
-FastAPI app, and lets the worker stay short and readable.
+    • `prepare_yolo_dataset`  — extract + bucket + label train+val frames.
+    • `prepare_eval_dataset`  — same shape, one held-out eval teacher.
+    • `classify_frames` / `FrameBuckets` — pure confidence-band bucketing.
+    • `_coco_to_yolo_lines` — COCO bbox → YOLO line conversion.
+    • `_read_teacher_coco`, `_extract_frames` — internal I/O helpers
+      (monkey-patched by the regression test, hence still public-ish).
+    • `DatasetSummary`, `MIN_TRAIN_ANNOTATIONS`, `INFERENCE_TIMING_SAMPLES`,
+      `model_size_mb`, `_pick_device` — utilities consumed by the
+      orchestration layer.
+
+What moved out
+--------------
+The actual trainer — `train_yolo`, `eval_yolo`, `time_inference` — moved
+to `pipeline.students.yolo` as methods on the `YoloTrainer` class.
+Phase 1's dispatcher (`pipeline.students.make_trainer(name)`) is the
+new entry point and `pipeline.optimize` calls it directly. The bodies
+were ported byte-for-byte so a yolov8n run through the dispatcher
+produces numerically identical results to the pre-Phase-1 path
+(spec acceptance gate Phase 1.5 #2).
+
+Why this file still exists
+--------------------------
+The data-prep helpers above are framework-agnostic — every architecture
+the project will support (YOLO, RT-DETR, DINOv3) consumes a YOLO-format
+dataset. Keeping them out of the trainer registry means new trainer
+files don't have to re-import frame-extraction or COCO conversion.
 
 On-disk layout under runs/student_<id>/
 ---------------------------------------
@@ -39,9 +54,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-import shutil
-import time
-from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -661,193 +673,15 @@ def prepare_eval_dataset(
     return data_yaml, n_imgs, n_anns
 
 
-# ---- Training --------------------------------------------------------------
+# ---- Trainer-side utilities ------------------------------------------------
+#
+# `_pick_device` historically lived in this file — its only callers today
+# are the YOLO trainer (now in `pipeline/students/yolo.py`) and the eval
+# helpers above. We re-export the canonical implementation from there so
+# the device pick logic has exactly one home; existing callers that did
+# `from pipeline.distill import _pick_device` keep working unchanged.
 
-
-def _pick_device() -> str:
-    """Best available torch device for Ultralytics on this box.
-
-    On Apple Silicon (the project's primary target) MPS is dramatically
-    faster than CPU — Ultralytics auto-detects it but we set it explicitly
-    so the progress logs show the right thing.
-    """
-    try:
-        import torch
-    except ImportError:  # pragma: no cover — torch is a hard dep
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-def train_yolo(
-    *,
-    data_yaml: Path,
-    student_dir: Path,
-    base_model: str = "yolov8n.pt",
-    epochs: int = 50,
-    imgsz: int = 640,
-    progress: Optional[Callable[[int, int], None]] = None,
-) -> tuple[Path, float]:
-    """Train YOLOv8 on the prepared dataset; return (best_weights_path, seconds).
-
-    `progress(epoch, total_epochs)` is invoked after each epoch via an
-    Ultralytics callback so the GUI's progress bar tracks training rather
-    than freezing for the entire train_seconds duration.
-    """
-    from ultralytics import YOLO  # imported lazily — heavy module
-
-    device = _pick_device()
-    log.info("Distill: training %s on %s, %d epochs, imgsz=%d",
-             base_model, device, epochs, imgsz)
-
-    model = YOLO(base_model)
-
-    if progress:
-        # Ultralytics calls each callback with the trainer object; we
-        # peek at trainer.epoch (0-indexed) to report 1-based progress.
-        def _on_epoch_end(trainer):
-            try:
-                progress(int(trainer.epoch) + 1, int(epochs))
-            except Exception as e:  # pragma: no cover — never let progress kill training
-                log.warning("progress callback failed: %s", e)
-
-        model.add_callback("on_train_epoch_end", _on_epoch_end)
-
-    # Ultralytics' `project` arg is interpreted relative to the current CWD
-    # for filesystem ops, but newer versions (8.3+) can also resolve it
-    # against SETTINGS["runs_dir"] in some code paths. Pass an absolute
-    # path so output ends up exactly where we look for it on success and
-    # error reporting stays accurate.
-    project_dir = (student_dir / "ultralytics").resolve()
-    project_dir.mkdir(parents=True, exist_ok=True)
-
-    # Tee Ultralytics' chatter into a per-run log file so post-mortems
-    # don't have to scroll the uvicorn console. We attach a FileHandler
-    # to the "ultralytics" logger (catches LOGGER.warning/info), and also
-    # redirect stdout/stderr (catches print() and tqdm). The two streams
-    # may interleave, but for debugging "training silently produced no
-    # weights" that's exactly what we want.
-    log_path = student_dir / "train.log"
-    ult_logger = logging.getLogger("ultralytics")
-    fh = logging.FileHandler(str(log_path))
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    ult_logger.addHandler(fh)
-
-    t0 = time.perf_counter()
-    try:
-        with open(log_path, "a") as logf, redirect_stdout(logf), redirect_stderr(logf):
-            model.train(
-                data=str(data_yaml),
-                epochs=epochs,
-                imgsz=imgsz,
-                device=device,
-                project=str(project_dir),
-                name="train",
-                exist_ok=True,
-                verbose=True,  # log everything; we capture it to train.log
-                plots=False,  # save the disk space; we don't render Ultralytics plots in the UI
-            )
-    finally:
-        ult_logger.removeHandler(fh)
-        fh.close()
-    elapsed = time.perf_counter() - t0
-
-    # Locate best.pt — Ultralytics writes it into project/name/weights/best.pt.
-    best = project_dir / "train" / "weights" / "best.pt"
-    if not best.exists():
-        # Fallback: last.pt is usually present even if best.pt save was suppressed.
-        last = project_dir / "train" / "weights" / "last.pt"
-        if not last.exists():
-            raise RuntimeError(
-                f"Ultralytics produced no weights under {best.parent} — "
-                f"training may have failed silently. See {log_path} for the "
-                "captured stdout/stderr from the trainer."
-            )
-        best = last
-
-    # Copy to a stable, predictable location at the student dir root so
-    # downstream callers don't have to know about the ultralytics subtree.
-    out = student_dir / "best.pt"
-    shutil.copy2(best, out)
-    log.info("Distill: training done in %.1fs; weights -> %s", elapsed, out)
-    return out, elapsed
-
-
-# ---- Evaluation ------------------------------------------------------------
-
-
-def eval_yolo(
-    *,
-    weights: Path,
-    data_yaml: Path,
-) -> tuple[float, float]:
-    """Compute (map50, map50_95) for a YOLO checkpoint on a YOLO data.yaml.
-
-    Used per eval teacher to populate the per-eval-teacher transferability
-    table. Ultralytics' `model.val()` returns a `DetMetrics` object with
-    `.box.map50` and `.box.map`.
-    """
-    from ultralytics import YOLO
-
-    model = YOLO(str(weights))
-    res = model.val(
-        data=str(data_yaml),
-        device=_pick_device(),
-        verbose=False,
-        plots=False,
-        save_json=False,
-    )
-    map50 = float(getattr(res.box, "map50", 0.0) or 0.0)
-    map5095 = float(getattr(res.box, "map", 0.0) or 0.0)  # the unsuffixed `.map` IS map@0.5:0.95
-    return map50, map5095
-
-
-# ---- Inference timing ------------------------------------------------------
-
-
-def time_inference(
-    *,
-    weights: Path,
-    sample_image_dir: Path,
-    n_samples: int = INFERENCE_TIMING_SAMPLES,
-) -> tuple[float, float, float]:
-    """Run inference on up to `n_samples` JPGs and return (avg_ms, p50_ms, p95_ms).
-
-    We exclude the first call from the average — the first inference pays
-    for kernel compilation, JIT warm-up, and weight-to-device transfer.
-    Subsequent calls are what the user will actually feel at runtime.
-    """
-    from ultralytics import YOLO
-
-    jpgs = sorted(sample_image_dir.rglob("*.jpg"))
-    if not jpgs:
-        log.warning("no images for timing under %s — skipping", sample_image_dir)
-        return 0.0, 0.0, 0.0
-    sample = jpgs[:n_samples]
-
-    model = YOLO(str(weights))
-    device = _pick_device()
-
-    # Warmup pass — discarded.
-    model.predict(str(sample[0]), device=device, verbose=False)
-
-    timings: list[float] = []
-    for p in sample:
-        t0 = time.perf_counter()
-        model.predict(str(p), device=device, verbose=False)
-        timings.append((time.perf_counter() - t0) * 1000.0)
-
-    if not timings:
-        return 0.0, 0.0, 0.0
-    timings.sort()
-    avg = sum(timings) / len(timings)
-    p50 = timings[len(timings) // 2]
-    p95 = timings[min(len(timings) - 1, int(len(timings) * 0.95))]
-    return avg, p50, p95
+from pipeline.students.yolo import _pick_device  # noqa: E402, F401 — re-export
 
 
 # ---- Convenience -----------------------------------------------------------

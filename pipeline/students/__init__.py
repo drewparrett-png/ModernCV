@@ -25,7 +25,7 @@ imports.
 Adding a new trainer file: drop it under `pipeline/students/`, add an
 `@register("…") class …(YoloTrainer): base_model = "…"` block, and add
 a `from . import <module>  # noqa: F401` line below so the import-time
-side-effect fires. The yolo trainer module lands in commit 1.2.
+side-effect fires.
 """
 
 from __future__ import annotations
@@ -41,6 +41,12 @@ from pipeline.students.registry import (
     make_trainer,
     register,
 )
+
+# Import the trainer modules for their `@register(...)` side effects.
+# Order doesn't matter — each `@register` is independent — but keeping
+# them grouped by framework (Ultralytics first; future DINOv3 below) makes
+# the file readable as a "what's wired" inventory.
+from . import yolo  # noqa: F401 — yolov8n / yolov8s / yolov8m
 
 __all__ = [
     "INFERENCE_TIMING_SAMPLES",
