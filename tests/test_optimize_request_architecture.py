@@ -87,3 +87,17 @@ def test_other_registered_yolo_sizes_pass() -> None:
                 train_teacher_ids=["t1"], architecture=name,
             )
             assert req.architecture == name
+
+
+def test_rtdetr_l_architecture_roundtrips() -> None:
+    """Phase 2.1 registers `rtdetr-l` via `pipeline.students.rtdetr`.
+    The validator must accept it because it's in the live registry —
+    no special-casing of architecture names anywhere. If this test
+    fails, the most likely cause is the `from . import rtdetr` line
+    being missing from `pipeline/students/__init__.py` (the
+    `@register("rtdetr-l")` decorator runs at module-import time only)."""
+    assert "rtdetr-l" in list_trainers()
+    req = OptimizeRequest(
+        train_teacher_ids=["t1"], architecture="rtdetr-l",
+    )
+    assert req.architecture == "rtdetr-l"
