@@ -183,14 +183,14 @@ def classify_frames(coco: dict, *, t_high: float, t_low: float) -> FrameBuckets:
     return buckets
 
 
-def _read_teacher_coco(teacher_id: str) -> tuple[dict, str]:
+def _read_teacher_coco(project_id: str, teacher_id: str) -> tuple[dict, str]:
     """Load a teacher's coco.json and return (coco_dict, video_path).
 
     `video_path` is read from the teacher's manifest — that's where we
     extract frames from on demand, since we deliberately don't pre-extract
     JPGs at Learn time (would add hundreds of MB per Teacher run).
     """
-    rdir = runs_mod.run_dir(teacher_id)
+    rdir = runs_mod.run_dir(project_id, teacher_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise FileNotFoundError(f"teacher dir missing: {rdir}")
     coco_path = rdir / runs_mod.LABELS_DIR / runs_mod.COCO_NAME
@@ -292,7 +292,9 @@ def _coco_to_yolo_lines(
     return lines
 
 
-def _merge_class_vocabs(teacher_ids: list[str]) -> tuple[list[str], dict[str, dict[int, int]]]:
+def _merge_class_vocabs(
+    project_id: str, teacher_ids: list[str]
+) -> tuple[list[str], dict[str, dict[int, int]]]:
     """Build a global class vocabulary across teachers.
 
     Returns:
@@ -306,7 +308,7 @@ def _merge_class_vocabs(teacher_ids: list[str]) -> tuple[list[str], dict[str, di
     class_names: list[str] = []
     per_teacher: dict[str, dict[int, int]] = {}
     for tid in teacher_ids:
-        coco, _ = _read_teacher_coco(tid)
+        coco, _ = _read_teacher_coco(project_id, tid)
         local_map: dict[int, int] = {}
         for cat in coco.get("categories", []):
             cname = cat["name"]
@@ -321,6 +323,7 @@ def _merge_class_vocabs(teacher_ids: list[str]) -> tuple[list[str], dict[str, di
 
 def prepare_yolo_dataset(
     *,
+    project_id: str,
     student_dir: Path,
     train_teacher_ids: list[str],
     t_high: float = 0.35,
@@ -373,7 +376,7 @@ def prepare_yolo_dataset(
         )
 
     rng = random.Random(seed)
-    class_names, per_teacher_map = _merge_class_vocabs(train_teacher_ids)
+    class_names, per_teacher_map = _merge_class_vocabs(project_id, train_teacher_ids)
     if not class_names:
         raise ValueError(
             "merged train teachers have no classes — Teacher COCOs are empty?"
@@ -398,7 +401,7 @@ def prepare_yolo_dataset(
     per_teacher_buckets: list[dict] = []
 
     for tid in train_teacher_ids:
-        coco, video_path = _read_teacher_coco(tid)
+        coco, video_path = _read_teacher_coco(project_id, tid)
         cat_map = per_teacher_map[tid]
         # Index COCO annotations by image_id so we don't re-scan per image.
         anns_by_image: dict[int, list[dict]] = {}
@@ -580,6 +583,7 @@ def prepare_yolo_dataset(
 
 def prepare_eval_dataset(
     *,
+    project_id: str,
     student_dir: Path,
     eval_teacher_id: str,
     class_names: list[str],
@@ -594,7 +598,7 @@ def prepare_eval_dataset(
 
     Returns (data_yaml_path, n_images, n_annotations).
     """
-    coco, video_path = _read_teacher_coco(eval_teacher_id)
+    coco, video_path = _read_teacher_coco(project_id, eval_teacher_id)
     # Map this eval teacher's COCO categories → the trained vocab's ids.
     # If a category name doesn't exist in the Student's vocab, we skip it
     # (annotations with that cat get dropped, which is the right semantics

@@ -53,6 +53,7 @@ class _LearnJob:
     """Frozen request payload + the run dir/manifest the worker needs."""
 
     rdir: Path
+    project_id: str
     manifest_id: str
     task: str
     # `prompts` is the canonical class list — one user chip per element.
@@ -487,6 +488,7 @@ def _resolve_prompts(
 
 def run_learn(
     *,
+    project_id: str,
     task: str,
     video_path: str,
     prompt: Optional[str] = None,
@@ -509,6 +511,7 @@ def run_learn(
     """
     chips, display = _resolve_prompts(prompt, prompts)
     rdir, manifest = runs_mod.create_run(
+        project_id=project_id,
         task=task,
         prompt=display,
         video_path=video_path,
@@ -539,6 +542,7 @@ def run_learn(
 
 def run_learn_in_background(
     *,
+    project_id: str,
     task: str,
     video_path: str,
     prompt: Optional[str] = None,
@@ -576,6 +580,7 @@ def run_learn_in_background(
         raise
 
     rdir, manifest = runs_mod.create_run(
+        project_id=project_id,
         task=task,
         prompt=display,
         video_path=video_path,
@@ -618,6 +623,7 @@ def run_learn_in_background(
 
     job = _LearnJob(
         rdir=rdir,
+        project_id=project_id,
         manifest_id=manifest.id,
         task=task,
         prompt=display,

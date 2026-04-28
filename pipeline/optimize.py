@@ -67,12 +67,14 @@ def _seed_progress(rdir: Path, *, message: str, total_epochs: int = 50) -> None:
     )
 
 
-def _read_teacher_coco_summary(teacher_id: str) -> tuple[int, int, list[str]]:
+def _read_teacher_coco_summary(
+    project_id: str, teacher_id: str
+) -> tuple[int, int, list[str]]:
     """Quick stats from the teacher's coco.json: (n_images, n_annotations,
     class_names). Used to populate StudentStats and decide whether the
     teacher is even ready to distill from."""
     path = (
-        runs_mod.run_dir(teacher_id)
+        runs_mod.run_dir(project_id, teacher_id)
         / runs_mod.LABELS_DIR
         / runs_mod.COCO_NAME
     )
@@ -89,6 +91,7 @@ def _read_teacher_coco_summary(teacher_id: str) -> tuple[int, int, list[str]]:
 
 
 def _summarize_teacher_set(
+    project_id: str,
     teacher_ids: list[str],
 ) -> tuple[int, int, list[str]]:
     """Aggregate (images, annotations, union-of-class-names) across many
@@ -106,7 +109,7 @@ def _summarize_teacher_set(
     seen: set[str] = set()
     for tid in teacher_ids:
         try:
-            imgs, anns, cnames = _read_teacher_coco_summary(tid)
+            imgs, anns, cnames = _read_teacher_coco_summary(project_id, tid)
         except FileNotFoundError as e:
             # A teacher in the user's list might be in a weird state (e.g.
             # they marked it completed but the COCO export failed). Skip
@@ -126,6 +129,7 @@ def _summarize_teacher_set(
 
 def run_optimize_in_background(
     *,
+    project_id: str,
     train_teacher_ids: list[str],
     eval_teacher_ids: list[str],
     task: str,
@@ -166,7 +170,7 @@ def run_optimize_in_background(
     # in the worker — a missing eval teacher is recoverable (we just skip
     # eval), but a missing train teacher means the run is meaningless.
     for tid in train_teacher_ids:
-        teacher = runs_mod.read_manifest(runs_mod.run_dir(tid))
+        teacher = runs_mod.read_manifest(runs_mod.run_dir(project_id, tid))
         if teacher.status != "completed":
             raise ValueError(
                 f"teacher {tid!r} status is {teacher.status!r}; "
@@ -177,7 +181,9 @@ def run_optimize_in_background(
     # students don't have a single "prompt" — listing all of them would
     # blow up the sidebar — so we use the first as the canonical label and
     # the train_teacher_ids list carries the rest.
-    first_train = runs_mod.read_manifest(runs_mod.run_dir(train_teacher_ids[0]))
+    first_train = runs_mod.read_manifest(
+        runs_mod.run_dir(project_id, train_teacher_ids[0])
+    )
     display_prompt = first_train.prompt
     if len(train_teacher_ids) > 1:
         display_prompt = f"{display_prompt} (+{len(train_teacher_ids) - 1} more)"
@@ -190,6 +196,7 @@ def run_optimize_in_background(
     models["track"] = track_impl or "bytetrack"
 
     rdir, manifest = runs_mod.create_student(
+        project_id=project_id,
         train_teacher_ids=train_teacher_ids,
         eval_teacher_ids=eval_teacher_ids,
         task=task,
@@ -214,6 +221,7 @@ def run_optimize_in_background(
     def _worker() -> None:
         try:
             _run_distillation(
+                project_id=project_id,
                 rdir=rdir,
                 train_teacher_ids=train_teacher_ids,
                 eval_teacher_ids=eval_teacher_ids,
@@ -265,6 +273,7 @@ def _progress_writer(rdir: Path, total_epochs: int, started_at: str):
 
 def _run_distillation(
     *,
+    project_id: str,
     rdir: Path,
     train_teacher_ids: list[str],
     eval_teacher_ids: list[str],
@@ -309,6 +318,7 @@ def _run_distillation(
         progress("loading_models", msg, cur, tot)
 
     summary = distill.prepare_yolo_dataset(
+        project_id=project_id,
         student_dir=rdir,
         train_teacher_ids=train_teacher_ids,
         t_high=t_high,
@@ -362,6 +372,7 @@ def _run_distillation(
             )
             try:
                 eval_yaml, n_imgs, n_anns = distill.prepare_eval_dataset(
+                    project_id=project_id,
                     student_dir=rdir,
                     eval_teacher_id=etid,
                     class_names=summary.class_names,

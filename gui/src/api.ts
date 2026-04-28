@@ -7,6 +7,9 @@ import type {
   PerFrameLabels,
   PreviewBucketsRequest,
   PreviewBucketsResponse,
+  Project,
+  ProjectCreateRequest,
+  ProjectsResponse,
   RunDetail,
   RunResponse,
   RunsResponse,
@@ -18,6 +21,8 @@ import type {
 const API_BASE = "http://localhost:8000";
 
 export const apiBase = API_BASE;
+
+// ---- Discovery ----------------------------------------------------------
 
 export async function fetchBlocks(): Promise<BlocksResponse> {
   const res = await fetch(`${API_BASE}/blocks`);
@@ -41,37 +46,98 @@ export async function runGraph(graph: GraphSpec): Promise<RunResponse> {
   return res.json();
 }
 
-// ---- Learn / Runs --------------------------------------------------------
+// ---- Projects -----------------------------------------------------------
 
-export async function runLearn(req: LearnRequest): Promise<RunDetail> {
-  const res = await fetch(`${API_BASE}/learn`, {
+export async function fetchProjects(): Promise<ProjectsResponse> {
+  const res = await fetch(`${API_BASE}/projects`);
+  if (!res.ok) throw new Error(`GET /projects: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchProject(id: string): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`GET /projects/${id}: ${res.status}`);
+  return res.json();
+}
+
+export async function createProject(req: ProjectCreateRequest): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`POST /learn: ${res.status} ${text}`);
+    throw new Error(`POST /projects: ${res.status} ${text}`);
   }
   return res.json();
 }
 
-export async function fetchRuns(): Promise<RunsResponse> {
-  const res = await fetch(`${API_BASE}/runs`);
-  if (!res.ok) throw new Error(`GET /runs: ${res.status}`);
+export async function renameProject(id: string, name: string): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PATCH /projects/${id}: ${res.status} ${text}`);
+  }
   return res.json();
 }
 
-export async function fetchRunDetail(id: string): Promise<RunDetail> {
-  const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(id)}`);
-  if (!res.ok) throw new Error(`GET /runs/${id}: ${res.status}`);
+export async function deleteProject(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`DELETE /projects/${id}: ${res.status}`);
+  }
+}
+
+// ---- Per-project: Learn / Runs -----------------------------------------
+
+function p(projectId: string): string {
+  return `${API_BASE}/projects/${encodeURIComponent(projectId)}`;
+}
+
+export async function runLearn(
+  projectId: string,
+  req: LearnRequest,
+): Promise<RunDetail> {
+  const res = await fetch(`${p(projectId)}/learn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST .../learn: ${res.status} ${text}`);
+  }
   return res.json();
 }
 
-/** Fetch the per_frame.jsonl, parsed into one PerFrameLabels per line. */
-export async function fetchRunLabels(id: string): Promise<PerFrameLabels[]> {
-  const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(id)}/labels`);
-  if (!res.ok) throw new Error(`GET /runs/${id}/labels: ${res.status}`);
+export async function fetchRuns(projectId: string): Promise<RunsResponse> {
+  const res = await fetch(`${p(projectId)}/runs`);
+  if (!res.ok) throw new Error(`GET .../runs: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRunDetail(
+  projectId: string,
+  id: string,
+): Promise<RunDetail> {
+  const res = await fetch(`${p(projectId)}/runs/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`GET .../runs/${id}: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRunLabels(
+  projectId: string,
+  id: string,
+): Promise<PerFrameLabels[]> {
+  const res = await fetch(`${p(projectId)}/runs/${encodeURIComponent(id)}/labels`);
+  if (!res.ok) throw new Error(`GET .../labels: ${res.status}`);
   const text = await res.text();
   return text
     .split("\n")
@@ -79,40 +145,43 @@ export async function fetchRunLabels(id: string): Promise<PerFrameLabels[]> {
     .map((l) => JSON.parse(l) as PerFrameLabels);
 }
 
-/** URL for a single frame — pass directly to <img src=…>, no parse needed. */
 export function runFrameUrl(
+  projectId: string,
   id: string,
   idx: number,
   source: "raw" | "overlay" = "overlay",
 ): string {
-  return `${API_BASE}/runs/${encodeURIComponent(id)}/frame/${idx}?source=${source}`;
+  return `${p(projectId)}/runs/${encodeURIComponent(id)}/frame/${idx}?source=${source}`;
 }
 
-export function runOverlayUrl(id: string): string {
-  return `${API_BASE}/runs/${encodeURIComponent(id)}/overlay.mp4`;
+export function runOverlayUrl(projectId: string, id: string): string {
+  return `${p(projectId)}/runs/${encodeURIComponent(id)}/overlay.mp4`;
 }
 
-// ---- Rejections / Delete ------------------------------------------------
+// ---- Rejections / Approve / Delete -------------------------------------
 
-/** Per-run rejection map: frame_idx → list of detection indices to drop. */
 export type RejectionMap = Record<string, number[]>;
 
-export async function fetchRejections(id: string): Promise<RejectionMap> {
+export async function fetchRejections(
+  projectId: string,
+  id: string,
+): Promise<RejectionMap> {
   const res = await fetch(
-    `${API_BASE}/runs/${encodeURIComponent(id)}/rejections`,
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/rejections`,
   );
-  if (!res.ok) throw new Error(`GET /runs/${id}/rejections: ${res.status}`);
+  if (!res.ok) throw new Error(`GET .../rejections: ${res.status}`);
   const body = (await res.json()) as { rejections: RejectionMap };
   return body.rejections;
 }
 
 export async function toggleRejection(
+  projectId: string,
   id: string,
   frame_idx: number,
   det_idx: number,
 ): Promise<RejectionMap> {
   const res = await fetch(
-    `${API_BASE}/runs/${encodeURIComponent(id)}/rejections/toggle`,
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/rejections/toggle`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -124,12 +193,38 @@ export async function toggleRejection(
   return body.rejections;
 }
 
-export async function deleteRun(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(id)}`, {
+export async function approveRun(
+  projectId: string,
+  id: string,
+): Promise<RunDetail["manifest"]> {
+  const res = await fetch(
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/approve`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`POST .../approve: ${res.status}`);
+  const body = await res.json();
+  return body.manifest;
+}
+
+export async function unapproveRun(
+  projectId: string,
+  id: string,
+): Promise<RunDetail["manifest"]> {
+  const res = await fetch(
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/unapprove`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`POST .../unapprove: ${res.status}`);
+  const body = await res.json();
+  return body.manifest;
+}
+
+export async function deleteRun(projectId: string, id: string): Promise<void> {
+  const res = await fetch(`${p(projectId)}/runs/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
   if (!res.ok && res.status !== 404) {
-    throw new Error(`DELETE /runs/${id}: ${res.status}`);
+    throw new Error(`DELETE .../runs/${id}: ${res.status}`);
   }
 }
 
@@ -151,69 +246,73 @@ export async function fetchCacheStatus(impls: string[]): Promise<CacheStatus[]> 
   return body.impls;
 }
 
-// ---- Students / Optimize ------------------------------------------------
+// ---- Per-project: Students / Optimize ----------------------------------
 
 export async function runOptimize(
+  projectId: string,
   req: OptimizeRequest,
 ): Promise<StudentDetail> {
-  const res = await fetch(`${API_BASE}/optimize`, {
+  const res = await fetch(`${p(projectId)}/optimize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`POST /optimize: ${res.status} ${text}`);
+    throw new Error(`POST .../optimize: ${res.status} ${text}`);
   }
   return res.json();
 }
 
-export async function fetchStudents(): Promise<StudentsResponse> {
-  const res = await fetch(`${API_BASE}/students`);
-  if (!res.ok) throw new Error(`GET /students: ${res.status}`);
+export async function fetchStudents(projectId: string): Promise<StudentsResponse> {
+  const res = await fetch(`${p(projectId)}/students`);
+  if (!res.ok) throw new Error(`GET .../students: ${res.status}`);
   return res.json();
 }
 
-export async function fetchStudentDetail(id: string): Promise<StudentDetail> {
-  const res = await fetch(`${API_BASE}/students/${encodeURIComponent(id)}`);
-  if (!res.ok) throw new Error(`GET /students/${id}: ${res.status}`);
+export async function fetchStudentDetail(
+  projectId: string,
+  id: string,
+): Promise<StudentDetail> {
+  const res = await fetch(`${p(projectId)}/students/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`GET .../students/${id}: ${res.status}`);
   return res.json();
 }
 
-export async function deleteStudent(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/students/${encodeURIComponent(id)}`, {
+export async function deleteStudent(
+  projectId: string,
+  id: string,
+): Promise<void> {
+  const res = await fetch(`${p(projectId)}/students/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
   if (!res.ok && res.status !== 404) {
-    throw new Error(`DELETE /students/${id}: ${res.status}`);
+    throw new Error(`DELETE .../students/${id}: ${res.status}`);
   }
 }
 
-/** Names of every registered Student-trainer architecture (Phase 1.4).
- *  Cheap — reads `pipeline.students.list_trainers()`. Cached in the
- *  Zustand store after the initial mount fetch. */
-export async function fetchArchitectures(): Promise<ArchitecturesResponse> {
-  const res = await fetch(`${API_BASE}/students/architectures`);
+export async function fetchArchitectures(
+  projectId: string,
+): Promise<ArchitecturesResponse> {
+  const res = await fetch(`${p(projectId)}/students/architectures`);
   if (!res.ok) {
-    throw new Error(`GET /students/architectures: ${res.status}`);
+    throw new Error(`GET .../architectures: ${res.status}`);
   }
   return res.json();
 }
 
-/** Live frame-bucket preview for the New Student form (Phase 0.4).
- *  Cheap on the backend — reads each teacher's coco.json and runs
- *  `classify_frames`, no frame extraction. Caller debounces. */
 export async function previewBuckets(
+  projectId: string,
   req: PreviewBucketsRequest,
 ): Promise<PreviewBucketsResponse> {
-  const res = await fetch(`${API_BASE}/students/preview-buckets`, {
+  const res = await fetch(`${p(projectId)}/students/preview-buckets`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`POST /students/preview-buckets: ${res.status} ${text}`);
+    throw new Error(`POST .../preview-buckets: ${res.status} ${text}`);
   }
   return res.json();
 }

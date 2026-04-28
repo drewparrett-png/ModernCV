@@ -2182,3 +2182,309 @@ html, body, #root {
 .compare-pareto-tooltip td:last-child {
   text-align: right;
 }
+
+/* ---- Phase 1: Projects ---------------------------------------------- */
+
+.project-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 1;
+  margin-left: 16px;
+  font-size: 12px;
+}
+.project-header-name { font-weight: 600; color: #111827; }
+.project-header-task {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.project-header-task.task-detection { background: #dbeafe; color: #1e40af; }
+.project-header-task.task-segmentation { background: #ede9fe; color: #5b21b6; }
+.project-header-prompts { display: flex; gap: 4px; flex-wrap: wrap; }
+.project-header-prompt-chip {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: #4b5563;
+}
+.project-header-switch {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  color: #4b5563;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.project-header-switch:hover { background: #f9fafb; color: #111827; }
+
+.projects-page {
+  padding: 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
+.projects-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.projects-header-row h2 { margin: 0; font-size: 20px; }
+.projects-create-btn {
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.projects-create-btn:hover { background: #1d4ed8; }
+.projects-empty {
+  background: #f9fafb;
+  border: 1px dashed #d1d5db;
+  padding: 32px;
+  border-radius: 8px;
+  text-align: center;
+  color: #4b5563;
+}
+.projects-empty p { margin: 0 0 8px; }
+.projects-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+}
+
+.projects-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.project-card {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.project-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.project-card-name { margin: 0; font-size: 16px; cursor: pointer; }
+.project-card-rename input {
+  font-size: 16px;
+  font-weight: 600;
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+.project-card-task {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.project-card-task.task-detection { background: #dbeafe; color: #1e40af; }
+.project-card-task.task-segmentation { background: #ede9fe; color: #5b21b6; }
+
+.project-card-prompts {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.project-card-prompt-chip {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: #4b5563;
+}
+
+.project-card-counters {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.project-card-counter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.project-card-counter-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+}
+.project-card-counter-label {
+  font-size: 10px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.project-card-running {
+  margin-left: auto;
+  color: #d97706;
+  font-weight: 600;
+}
+
+.project-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+.project-card-open {
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex: 1;
+}
+.project-card-open:hover { background: #1d4ed8; }
+.project-card-delete {
+  background: transparent;
+  color: #6b7280;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.project-card-delete:hover { color: #991b1b; border-color: #fca5a5; }
+
+.create-project-form {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 24px;
+  max-width: 600px;
+}
+.create-project-form h3 { margin: 0; }
+.create-project-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+.create-project-form label > span:first-child {
+  font-weight: 600;
+  color: #374151;
+}
+.create-project-form input,
+.create-project-form select {
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+.prompt-input-row {
+  display: flex;
+  gap: 6px;
+}
+.prompt-input-row input { flex: 1; }
+.prompt-input-row button {
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.prompt-chip-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-height: 24px;
+}
+.prompt-chip {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.prompt-chip button {
+  background: transparent;
+  border: none;
+  color: #1e40af;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  line-height: 1;
+}
+.create-project-help {
+  font-size: 12px;
+  color: #6b7280;
+  margin: 0;
+}
+.create-project-error {
+  color: #991b1b;
+  font-size: 12px;
+  margin: 0;
+}
+.create-project-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.create-project-actions button {
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.create-project-actions button[type="button"] {
+  background: transparent;
+  border: 1px solid #d1d5db;
+  color: #4b5563;
+}
+.create-project-actions button[type="submit"] {
+  background: #2563eb;
+  border: none;
+  color: white;
+  font-weight: 600;
+}
+.create-project-actions button[type="submit"]:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}

@@ -10,18 +10,11 @@
  * is now just "start another Teacher".
  */
 
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useMemo } from "react";
 import { useStore } from "../store";
-import type { RunDetail, RunProgress, Task } from "../types";
+import type { RunDetail, RunProgress } from "../types";
 import { runOverlayUrl } from "../api";
 import { VideoTreePicker } from "../components/VideoTreePicker";
-
-const TASK_DESCRIPTIONS: Record<Task, string> = {
-  detection:
-    "Find things and draw bounding boxes around them. Faster, looser localization.",
-  segmentation:
-    "Find things and outline their pixel-level shape. Slower, more precise.",
-};
 
 export function Learn() {
   const form = useStore((s) => s.learnForm);
@@ -36,6 +29,7 @@ export function Learn() {
   const setMode = useStore((s) => s.setMode);
   const startOptimize = useStore((s) => s.startOptimize);
   const openInspector = useStore((s) => s.openInspector);
+  const project = useStore((s) => s.getCurrentProject());
 
   const teachers = useMemo(() => {
     const arr = Object.values(teacherDetails);
@@ -109,41 +103,10 @@ export function Learn() {
         <section className="learn-form">
           <h3>New Teacher</h3>
           <p className="learn-blurb">
-            Type what you're looking for. The Teacher pipeline finds it
-            across every frame and saves the labels.
+            Pick a video. The Teacher will look for{" "}
+            <strong>{project ? project.prompts.join(", ") : "…"}</strong>{" "}
+            across every frame and save the labels.
           </p>
-
-          <label className="field">
-            <span className="field-label">Task</span>
-            <div className="task-toggle">
-              {(["detection", "segmentation"] as Task[]).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  className={`task-option ${form.task === t ? "active" : ""}`}
-                  onClick={() => setField("task", t)}
-                >
-                  <div className="task-name">
-                    {t === "detection" ? "Detection" : "Segmentation"}
-                  </div>
-                  <div className="task-desc">{TASK_DESCRIPTIONS[t]}</div>
-                </button>
-              ))}
-            </div>
-          </label>
-
-          <label className="field">
-            <span className="field-label">What are you looking for?</span>
-            <PromptChips
-              chips={form.prompts}
-              onChange={(next) => setField("prompts", next)}
-            />
-            <span className="field-hint">
-              Each chip is one class — type a phrase and press Enter (or
-              comma) to add it. Detections will be labeled with the exact
-              chip text. Use multiple chips to look for multiple things.
-            </span>
-          </label>
 
           <label className="field">
             <span className="field-label">Input video</span>
@@ -396,7 +359,7 @@ function TeacherRowDetail({
       {manifest.status === "completed" && (
         <video
           key={manifest.id}
-          src={runOverlayUrl(manifest.id)}
+          src={runOverlayUrl(manifest.project_id, manifest.id)}
           controls
           className="overlay-video sidebar-video"
         />
@@ -426,90 +389,3 @@ function TeacherRowDetail({
   );
 }
 
-/**
- * Multi-chip prompt input. Each chip is ONE user-intended class and
- * arrives at the GroundingDINO adapter atomically — no silent splitting
- * on whitespace, no confusion between "soccer" and "soccer ball".
- *
- * Interactions:
- *   - Enter or comma commits the current draft as a new chip
- *   - Backspace on an empty draft removes the last chip
- *   - Click the × on a chip to remove it
- *   - Pasting a string with commas splits into multiple chips
- *
- * Whitespace inside a chip is preserved on purpose — "soccer ball" and
- * "white black ball" are valid single phrases.
- */
-function PromptChips({
-  chips,
-  onChange,
-}: {
-  chips: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const [draft, setDraft] = useState("");
-
-  const commitDraft = (raw?: string) => {
-    const text = (raw ?? draft).trim();
-    if (!text) return;
-    // Allow comma-separated paste in one go.
-    const parts = text
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && !chips.includes(s));
-    if (parts.length === 0) {
-      setDraft("");
-      return;
-    }
-    onChange([...chips, ...parts]);
-    setDraft("");
-  };
-
-  const removeAt = (idx: number) => {
-    const next = chips.slice();
-    next.splice(idx, 1);
-    onChange(next);
-  };
-
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" || e.key === ",") {
-      e.preventDefault();
-      commitDraft();
-    } else if (e.key === "Backspace" && draft === "" && chips.length > 0) {
-      e.preventDefault();
-      removeAt(chips.length - 1);
-    }
-  };
-
-  return (
-    <div className="prompt-chips">
-      {chips.map((chip, i) => (
-        <span key={`${chip}-${i}`} className="prompt-chip">
-          <span className="prompt-chip-text">{chip}</span>
-          <button
-            type="button"
-            className="prompt-chip-remove"
-            onClick={() => removeAt(i)}
-            title={`Remove "${chip}"`}
-            aria-label={`Remove ${chip}`}
-          >
-            ×
-          </button>
-        </span>
-      ))}
-      <input
-        type="text"
-        className="prompt-chip-input"
-        value={draft}
-        placeholder={
-          chips.length === 0
-            ? "Type and hit Enter to add a search term"
-            : "+ add another"
-        }
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={onKeyDown}
-        onBlur={() => commitDraft()}
-      />
-    </div>
-  );
-}

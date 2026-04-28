@@ -126,6 +126,7 @@ function clampZoom(z: number): number {
 
 export function RunInspector() {
   const runId = useStore((s) => s.inspectingRunId);
+  const projectId = useStore((s) => s.currentProjectId);
   const close = useStore((s) => s.closeInspector);
 
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -139,7 +140,7 @@ export function RunInspector() {
   const [view, setView] = useState<View>(IDENTITY_VIEW);
 
   useEffect(() => {
-    if (!runId) return;
+    if (!runId || !projectId) return;
     setError(null);
     setDetail(null);
     setLabels(null);
@@ -149,9 +150,9 @@ export function RunInspector() {
     setView(IDENTITY_VIEW);
 
     Promise.all([
-      fetchRunDetail(runId),
-      fetchRunLabels(runId),
-      fetchRejections(runId),
+      fetchRunDetail(projectId, runId),
+      fetchRunLabels(projectId, runId),
+      fetchRejections(projectId, runId),
     ])
       .then(([d, l, r]) => {
         setDetail(d);
@@ -159,7 +160,7 @@ export function RunInspector() {
         setRejections(r);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [runId]);
+  }, [runId, projectId]);
 
   // Reset the zoom every time the user steps to a different frame — keeping
   // a 5x zoom across an entire scrub would be more disorienting than useful.
@@ -188,7 +189,7 @@ export function RunInspector() {
 
   const handleToggle = useCallback(
     async (detIdx: number) => {
-      if (!runId) return;
+      if (!runId || !projectId) return;
       setRejections((prev) => {
         const key = String(frameIdx);
         const cur = new Set(prev[key] ?? []);
@@ -200,18 +201,23 @@ export function RunInspector() {
         return next;
       });
       try {
-        const canonical = await apiToggleRejection(runId, frameIdx, detIdx);
+        const canonical = await apiToggleRejection(
+          projectId,
+          runId,
+          frameIdx,
+          detIdx,
+        );
         setRejections(canonical);
       } catch (e) {
         console.error("toggle rejection failed", e);
         try {
-          setRejections(await fetchRejections(runId));
+          setRejections(await fetchRejections(projectId, runId));
         } catch {
           /* user can retry */
         }
       }
     },
-    [runId, frameIdx],
+    [projectId, runId, frameIdx],
   );
 
   if (!runId) return null;
@@ -271,13 +277,13 @@ export function RunInspector() {
             <div className="inspector-grid">
               <FrameView
                 title="Source frame"
-                src={runFrameUrl(runId, frameIdx, "raw")}
+                src={runFrameUrl(projectId ?? "", runId, frameIdx, "raw")}
                 view={view}
                 onViewChange={setView}
               />
               <FrameView
                 title="Detections — click a box to reject · scroll to zoom · drag to pan"
-                src={runFrameUrl(runId, frameIdx, "raw")}
+                src={runFrameUrl(projectId ?? "", runId, frameIdx, "raw")}
                 detections={currentLabels?.detections ?? []}
                 rejected={rejectedHere}
                 hoveredIdx={hoveredIdx}

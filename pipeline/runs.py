@@ -1,21 +1,32 @@
-"""Teacher run directory format.
+"""Teacher / Student / Project directory format.
 
-A "Teacher run" is everything produced by one Learn-mode invocation:
-the prompt, the source video, the labels, the visualization, and timing
-stats. This module is the single source of truth for how those artifacts
-are laid out on disk and what the manifest looks like.
+A "Project" is the top-level container: it pins one (task, prompts) tuple
+and owns every Teacher and Student run produced under it. A "Teacher run"
+is everything produced by one Learn-mode invocation under a project.
 
 Layout
 ------
-    runs/teacher_<timestamp>_<slug>/
-        manifest.json        # task, prompt, video, models, status, timing
-        overlay.mp4          # visualization (boxes/masks rendered)
-        stats.json           # frames_processed, ms/frame, n_detections, …
-        labels/
-            coco.json        # standard COCO format for downstream training
-            per_frame.jsonl  # one line per frame — UI-fast slice
+    runs/
+      projects/
+        <project_id>/
+          project.json
+          teachers/
+            teacher_<timestamp>_<slug>/
+              manifest.json        # task, prompt, video, models, status, timing
+              overlay.mp4          # visualization (boxes/masks rendered)
+              stats.json           # frames_processed, ms/frame, n_detections, …
+              labels/
+                coco.json
+                per_frame.jsonl
+          students/
+            student_<timestamp>_<slug>/
+              manifest.json
+              stats.json
+              ...
 
-The manifest is the source of truth for status. A run with
+The project's `project.json` is the source of truth for (task, prompts).
+Both fields are LOCKED at creation — Teacher runs inside a project inherit
+them. The manifest is the source of truth for run status; a run with
 `status: "completed"` is what unlocks Optimize mode.
 """
 
@@ -32,6 +43,10 @@ from typing import Any, Iterable, Optional
 log = logging.getLogger(__name__)
 
 RUNS_DIR = Path("runs")
+PROJECTS_DIR = "projects"
+PROJECT_FILE = "project.json"
+TEACHERS_DIR = "teachers"
+STUDENTS_DIR = "students"
 MANIFEST_NAME = "manifest.json"
 STATS_NAME = "stats.json"
 PROGRESS_NAME = "progress.json"
@@ -40,6 +55,182 @@ OVERLAY_NAME = "overlay.mp4"
 LABELS_DIR = "labels"
 COCO_NAME = "coco.json"
 PER_FRAME_NAME = "per_frame.jsonl"
+
+
+# ---- Project --------------------------------------------------------------
+
+
+@dataclass
+class Project:
+    """Container metadata. Persisted as `project.json` at the project root.
+
+    `task` and `prompts` are immutable post-creation — runs reference them
+    by inheritance, and mutating them after a Student trains would break
+    the comparability of past runs. Only `name` is editable.
+    """
+
+    id: str
+    name: str
+    task: str  # "detection" | "segmentation"
+    prompts: list[str]
+    created_at: str  # ISO 8601 UTC
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2)
+
+
+def make_project_id(name: str, now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+    return f"proj_{ts}_{slugify(name)}"
+
+
+def projects_root(runs_root: Path = RUNS_DIR) -> Path:
+    return runs_root / PROJECTS_DIR
+
+
+def project_dir(project_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    return projects_root(runs_root) / project_id
+
+
+def teachers_dir(project_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    return project_dir(project_id, runs_root) / TEACHERS_DIR
+
+
+def students_dir(project_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    return project_dir(project_id, runs_root) / STUDENTS_DIR
+
+
+def write_project(pdir: Path, project: Project) -> None:
+    (pdir / PROJECT_FILE).write_text(project.to_json())
+
+
+def read_project(pdir: Path) -> Project:
+    raw = json.loads((pdir / PROJECT_FILE).read_text())
+    known = {f for f in Project.__dataclass_fields__}
+    return Project(**{k: v for k, v in raw.items() if k in known})
+
+
+def create_project(
+    *,
+    name: str,
+    task: str,
+    prompts: list[str],
+    runs_root: Path = RUNS_DIR,
+) -> Project:
+    if task not in {"detection", "segmentation"}:
+        raise ValueError(f"unknown task: {task!r}")
+    if not prompts:
+        raise ValueError("prompts must contain at least one entry")
+
+    project_id = make_project_id(name)
+    pdir = project_dir(project_id, runs_root)
+    pdir.mkdir(parents=True, exist_ok=False)
+    (pdir / TEACHERS_DIR).mkdir()
+    (pdir / STUDENTS_DIR).mkdir()
+
+    project = Project(
+        id=project_id,
+        name=name,
+        task=task,
+        prompts=list(prompts),
+        created_at=_now_iso(),
+    )
+    write_project(pdir, project)
+    log.info("created project %s", pdir)
+    return project
+
+
+def project_summary_counts(project_id: str, runs_root: Path = RUNS_DIR) -> dict[str, int]:
+    """Compute counters used by the project picker:
+        n_running, n_teacher_datasets, n_human_reviewed_datasets, n_students.
+
+    Walks the project's teachers/ + students/ once. Cheap relative to the
+    Learn / Optimize work that produced the runs.
+    """
+    n_running = 0
+    n_teacher = 0
+    n_reviewed = 0
+    n_students = 0
+
+    tdir = teachers_dir(project_id, runs_root)
+    if tdir.exists():
+        for p in tdir.iterdir():
+            if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+                continue
+            try:
+                m = read_manifest(p)
+            except Exception:
+                continue
+            if m.status in _STALE_STATES:
+                n_running += 1
+            if m.status == "completed":
+                n_teacher += 1
+                # "Human-reviewed" today = approved or any rejection. Phase 3
+                # tightens this to "every frame has a state"; we'll switch
+                # the helper then.
+                if m.approved_at is not None or has_any_rejections(p):
+                    n_reviewed += 1
+
+    sdir = students_dir(project_id, runs_root)
+    if sdir.exists():
+        for p in sdir.iterdir():
+            if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+                continue
+            try:
+                m = read_student_manifest(p)
+            except Exception:
+                continue
+            if m.status in _STALE_STATES:
+                n_running += 1
+            if m.status == "completed":
+                n_students += 1
+
+    return {
+        "n_running": n_running,
+        "n_teacher_datasets": n_teacher,
+        "n_human_reviewed_datasets": n_reviewed,
+        "n_students": n_students,
+    }
+
+
+def list_projects(runs_root: Path = RUNS_DIR) -> list[Project]:
+    root = projects_root(runs_root)
+    if not root.exists():
+        return []
+    out: list[Project] = []
+    for p in root.iterdir():
+        if not p.is_dir() or not (p / PROJECT_FILE).exists():
+            continue
+        try:
+            out.append(read_project(p))
+        except Exception as e:  # pragma: no cover — corrupt project.json
+            log.warning("skipping project %s: %s", p, e)
+    out.sort(key=lambda p: p.created_at, reverse=True)
+    return out
+
+
+def rename_project(project_id: str, name: str, runs_root: Path = RUNS_DIR) -> Project:
+    pdir = project_dir(project_id, runs_root)
+    if not (pdir / PROJECT_FILE).exists():
+        raise FileNotFoundError(f"no such project: {project_id}")
+    p = read_project(pdir)
+    p.name = name
+    write_project(pdir, p)
+    return p
+
+
+def delete_project(project_id: str, runs_root: Path = RUNS_DIR) -> None:
+    import shutil
+
+    pdir = project_dir(project_id, runs_root)
+    if not pdir.exists():
+        return
+    shutil.rmtree(pdir)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # ---- Manifest --------------------------------------------------------------
@@ -292,21 +483,33 @@ def make_student_id(prompt: str, now: Optional[datetime] = None) -> str:
     return f"student_{ts}_{slugify(prompt)}"
 
 
-def run_dir(run_id: str, runs_root: Path = RUNS_DIR) -> Path:
-    return runs_root / run_id
+def run_dir(project_id: str, run_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    """Path to a Teacher run directory under its project."""
+    return teachers_dir(project_id, runs_root) / run_id
+
+
+def student_dir(project_id: str, student_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    """Path to a Student run directory under its project."""
+    return students_dir(project_id, runs_root) / student_id
 
 
 # ---- Create / write --------------------------------------------------------
 
 
 def create_run(
+    project_id: str,
     task: str,
     prompt: str,
     video_path: str,
     models: dict[str, str],
     runs_root: Path = RUNS_DIR,
 ) -> tuple[Path, RunManifest]:
-    """Allocate a fresh run directory and write an initial 'running' manifest.
+    """Allocate a fresh run directory under the given project and write an
+    initial 'running' manifest.
+
+    `task` and `prompt` are typically supplied by the caller from the
+    project's locked metadata. Validation here is defensive — the project
+    is the source of truth.
 
     Returns (run_dir_path, manifest). The caller should fill in stats and
     flip status to 'completed' (or 'failed') when done — see
@@ -314,9 +517,12 @@ def create_run(
     """
     if task not in {"detection", "segmentation"}:
         raise ValueError(f"unknown task: {task!r}")
+    pdir = project_dir(project_id, runs_root)
+    if not (pdir / PROJECT_FILE).exists():
+        raise FileNotFoundError(f"no such project: {project_id}")
 
     run_id = make_run_id(prompt)
-    rdir = run_dir(run_id, runs_root)
+    rdir = run_dir(project_id, run_id, runs_root)
     rdir.mkdir(parents=True, exist_ok=False)
     (rdir / LABELS_DIR).mkdir()
 
@@ -325,7 +531,7 @@ def create_run(
         task=task,
         prompt=prompt,
         video_path=video_path,
-        started_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        started_at=_now_iso(),
         models=models,
     )
     write_manifest(rdir, manifest)
@@ -366,9 +572,7 @@ def read_progress(rdir: Path) -> Optional[RunProgress]:
 def mark_completed(rdir: Path, stats: Optional[RunStats] = None) -> RunManifest:
     manifest = read_manifest(rdir)
     manifest.status = "completed"
-    manifest.ended_at = (
-        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    manifest.ended_at = _now_iso()
     write_manifest(rdir, manifest)
     if stats is not None:
         write_stats(rdir, stats)
@@ -379,9 +583,7 @@ def mark_failed(rdir: Path, error: str) -> RunManifest:
     manifest = read_manifest(rdir)
     manifest.status = "failed"
     manifest.error = error
-    manifest.ended_at = (
-        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    manifest.ended_at = _now_iso()
     write_manifest(rdir, manifest)
     return manifest
 
@@ -389,15 +591,13 @@ def mark_failed(rdir: Path, error: str) -> RunManifest:
 def approve_run(rdir: Path) -> RunManifest:
     """Stamp `approved_at` on the manifest. No-op if already approved.
 
-    Caller (the /runs/{id}/approve endpoint) is responsible for the
-    "must be completed" 400 — this helper trusts its input.
+    Caller is responsible for the "must be completed" 400 — this helper
+    trusts its input.
     """
     manifest = read_manifest(rdir)
     if manifest.approved_at is not None:
         return manifest
-    manifest.approved_at = (
-        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    manifest.approved_at = _now_iso()
     write_manifest(rdir, manifest)
     return manifest
 
@@ -410,6 +610,24 @@ def unapprove_run(rdir: Path) -> RunManifest:
     manifest.approved_at = None
     write_manifest(rdir, manifest)
     return manifest
+
+
+def derive_review_status(rdir: Path) -> str:
+    """Three-state human-review summary computed from disk.
+
+    Used by API endpoints to populate `RunManifestModel.review_status`.
+    "approved" if the manifest has `approved_at`; otherwise "reviewed"
+    iff `rejections.json` has any non-empty entry; else "unreviewed".
+    """
+    try:
+        manifest = read_manifest(rdir)
+    except Exception:
+        return "unreviewed"
+    if manifest.approved_at is not None:
+        return "approved"
+    if has_any_rejections(rdir):
+        return "reviewed"
+    return "unreviewed"
 
 
 # ---- Read / list -----------------------------------------------------------
@@ -441,8 +659,8 @@ _STALE_STATES = ("running", "queued")
 
 
 def mark_stale_runs_failed(runs_root: Path = RUNS_DIR) -> int:
-    """At server startup, sweep any 'running' or 'queued' runs and flip
-    them to failed.
+    """At server startup, sweep all projects' Teacher + Student runs and
+    flip any in 'running' / 'queued' status to 'failed'.
 
     Rationale: Learn / Optimize workers run as *daemon threads* on the
     server process, and the Teacher queue is purely in-memory. uvicorn
@@ -454,52 +672,53 @@ def mark_stale_runs_failed(runs_root: Path = RUNS_DIR) -> int:
     Calling this on startup is correct because at that exact moment, by
     definition, no in-flight worker can have survived from before the
     restart — so every 'running' / 'queued' status on disk is stale.
-    Both teacher runs (RunManifest) and student runs (StudentManifest)
-    are swept.
 
     Returns the number of runs that were patched.
     """
-    if not runs_root.exists():
+    root = projects_root(runs_root)
+    if not root.exists():
         return 0
     n = 0
-    for p in runs_root.iterdir():
-        if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+    for pdir in root.iterdir():
+        if not pdir.is_dir() or not (pdir / PROJECT_FILE).exists():
             continue
-        # Teacher run? (id prefix "teacher_")
-        if p.name.startswith("teacher_"):
-            try:
-                m = read_manifest(p)
-                if m.status in _STALE_STATES:
-                    mark_failed(p, _STALE_INTERRUPT_MSG)
-                    n += 1
-            except Exception as e:  # pragma: no cover — corrupted manifest
-                log.warning("could not patch teacher %s: %s", p, e)
-        elif p.name.startswith("student_"):
-            try:
-                m = read_student_manifest(p)
-                if m.status in _STALE_STATES:
-                    mark_student_failed(p, _STALE_INTERRUPT_MSG)
-                    n += 1
-            except Exception as e:  # pragma: no cover
-                log.warning("could not patch student %s: %s", p, e)
+        tdir = pdir / TEACHERS_DIR
+        if tdir.exists():
+            for p in tdir.iterdir():
+                if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+                    continue
+                try:
+                    m = read_manifest(p)
+                    if m.status in _STALE_STATES:
+                        mark_failed(p, _STALE_INTERRUPT_MSG)
+                        n += 1
+                except Exception as e:  # pragma: no cover
+                    log.warning("could not patch teacher %s: %s", p, e)
+        sdir = pdir / STUDENTS_DIR
+        if sdir.exists():
+            for p in sdir.iterdir():
+                if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+                    continue
+                try:
+                    m = read_student_manifest(p)
+                    if m.status in _STALE_STATES:
+                        mark_student_failed(p, _STALE_INTERRUPT_MSG)
+                        n += 1
+                except Exception as e:  # pragma: no cover
+                    log.warning("could not patch student %s: %s", p, e)
     if n:
         log.info("marked %d stale running/queued runs as failed at startup", n)
     return n
 
 
-def list_runs(runs_root: Path = RUNS_DIR) -> list[RunManifest]:
-    """Teacher-run manifests on disk, newest first. Filters to dirs whose
-    name starts with 'teacher_' so Student dirs don't bleed into the
-    Teacher list."""
-    if not runs_root.exists():
+def list_runs(project_id: str, runs_root: Path = RUNS_DIR) -> list[RunManifest]:
+    """Teacher-run manifests under one project, newest first."""
+    tdir = teachers_dir(project_id, runs_root)
+    if not tdir.exists():
         return []
     out: list[RunManifest] = []
-    for p in runs_root.iterdir():
-        if not p.is_dir():
-            continue
-        if not p.name.startswith("teacher_"):
-            continue
-        if not (p / MANIFEST_NAME).exists():
+    for p in tdir.iterdir():
+        if not p.is_dir() or not (p / MANIFEST_NAME).exists():
             continue
         try:
             out.append(read_manifest(p))
@@ -550,16 +769,14 @@ def write_student_stats(rdir: Path, stats: StudentStats) -> None:
     (rdir / STATS_NAME).write_text(stats.to_json())
 
 
-def list_students(runs_root: Path = RUNS_DIR) -> list[StudentManifest]:
-    if not runs_root.exists():
+def list_students(project_id: str, runs_root: Path = RUNS_DIR) -> list[StudentManifest]:
+    """Student manifests under one project, newest first."""
+    sdir = students_dir(project_id, runs_root)
+    if not sdir.exists():
         return []
     out: list[StudentManifest] = []
-    for p in runs_root.iterdir():
-        if not p.is_dir():
-            continue
-        if not p.name.startswith("student_"):
-            continue
-        if not (p / MANIFEST_NAME).exists():
+    for p in sdir.iterdir():
+        if not p.is_dir() or not (p / MANIFEST_NAME).exists():
             continue
         try:
             out.append(read_student_manifest(p))
@@ -571,6 +788,7 @@ def list_students(runs_root: Path = RUNS_DIR) -> list[StudentManifest]:
 
 def create_student(
     *,
+    project_id: str,
     train_teacher_ids: list[str],
     eval_teacher_ids: list[str],
     task: str,
@@ -599,9 +817,12 @@ def create_student(
     """
     if not train_teacher_ids:
         raise ValueError("train_teacher_ids must contain at least one teacher")
+    pdir = project_dir(project_id, runs_root)
+    if not (pdir / PROJECT_FILE).exists():
+        raise FileNotFoundError(f"no such project: {project_id}")
 
     student_id = make_student_id(prompt)
-    rdir = runs_root / student_id
+    rdir = student_dir(project_id, student_id, runs_root)
     rdir.mkdir(parents=True, exist_ok=False)
 
     manifest = StudentManifest(
@@ -610,7 +831,7 @@ def create_student(
         eval_teacher_ids=list(eval_teacher_ids),
         task=task,
         prompt=prompt,
-        started_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        started_at=_now_iso(),
         models=models,
         t_high=t_high,
         t_low=t_low,
@@ -630,9 +851,7 @@ def create_student(
 def mark_student_completed(rdir: Path, stats: Optional[StudentStats] = None) -> StudentManifest:
     manifest = read_student_manifest(rdir)
     manifest.status = "completed"
-    manifest.ended_at = (
-        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    manifest.ended_at = _now_iso()
     write_student_manifest(rdir, manifest)
     if stats is not None:
         write_student_stats(rdir, stats)
@@ -643,9 +862,7 @@ def mark_student_failed(rdir: Path, error: str) -> StudentManifest:
     manifest = read_student_manifest(rdir)
     manifest.status = "failed"
     manifest.error = error
-    manifest.ended_at = (
-        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    manifest.ended_at = _now_iso()
     write_student_manifest(rdir, manifest)
     return manifest
 
