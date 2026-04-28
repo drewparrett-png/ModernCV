@@ -22,6 +22,8 @@ dependencies = [
     "filterpy>=1.4.5",           # Kalman filter, used by ByteTrack/BoT-SORT
     "scikit-learn>=1.5.0",       # KMeans for team clustering
     "tqdm>=4.66.0",
+    "transformers>=4.45.0",      # GroundingDINO via IDEA-Research/grounding-dino-tiny
+    "accelerate>=0.34.0",        # device placement / autocast helpers used by transformers
 ]
 
 [project.optional-dependencies]

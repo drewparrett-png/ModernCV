@@ -10,29 +10,112 @@ import {
   type NodeChange,
 } from "reactflow";
 
-import { fetchBlocks, runGraph } from "./api";
+import {
+  deleteRun as apiDeleteRun,
+  deleteStudent as apiDeleteStudent,
+  fetchBlocks,
+  fetchCacheStatus,
+  fetchRunDetail,
+  fetchRuns,
+  fetchStudentDetail,
+  fetchStudents,
+  fetchVideos,
+  runGraph,
+  runLearn,
+  runOptimize,
+} from "./api";
 import { seedEdges, seedNodes } from "./seed";
 import type {
   BlockKind,
   BlockNodeData,
   GraphSpec,
+  LearnRequest,
+  Mode,
+  OptimizeRequest,
+  RunDetail,
   RunResponse,
+  StudentDetail,
+  Task,
 } from "./types";
 
+interface LearnFormState {
+  task: Task;
+  /** One chip per class — each is a complete phrase ("soccer ball",
+   *  "player"). The detector treats each chip atomically and labels
+   *  detections with the matching chip text. */
+  prompts: string[];
+  videoPath: string;
+  maxFrames: number | null;
+  /** Confidence threshold for box scores. Defaults match the GroundingDINO
+   *  adapter's defaults (0.30 / 0.25); lower box_threshold to ~0.15-0.20
+   *  for small-object prompts like "soccer ball" that score lower than
+   *  player-sized prompts. */
+  boxThreshold: number;
+  textThreshold: number;
+  /** Skip the GroundingDINO HF processor's resize step. The default
+   *  shrinks 1080p footage to ~1333×750, which blurs small targets like
+   *  the soccer ball. Tradeoff: ~2× per-frame latency. */
+  fullResolution: boolean;
+}
+
 interface State {
+  // Top-level mode
+  mode: Mode;
+  setMode: (m: Mode) => void;
+
+  // Catalog
   blocks: Record<string, string[]>;
+  videos: string[];
+  dataDir: string;
+  loadBlocks: () => Promise<void>;
+  loadVideos: () => Promise<void>;
+
+  // Graph editor (existing)
   nodes: Node<BlockNodeData>[];
   edges: Edge[];
   runResult: RunResponse | null;
   runError: string | null;
   running: boolean;
-  loadBlocks: () => Promise<void>;
   setImpl: (nodeId: string, impl: string) => void;
   setParam: (nodeId: string, key: string, value: unknown) => void;
   onNodesChange: (changes: NodeChange[]) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
   run: () => Promise<void>;
+
+  // Learn (Teachers) — multi-run
+  learnForm: LearnFormState;
+  setLearnField: <K extends keyof LearnFormState>(
+    key: K,
+    value: LearnFormState[K],
+  ) => void;
+  learnError: string | null;
+  /** All runs visible to the UI: either persisted (loaded from /runs) or
+   *  freshly kicked off this session. Keyed by id. */
+  teacherDetails: Record<string, RunDetail>;
+  /** Active polling handles per teacher run id. */
+  teacherPolls: Record<string, ReturnType<typeof setInterval>>;
+  /** Currently selected teacher in the Learn sidebar. */
+  selectedTeacherId: string | null;
+  selectTeacher: (id: string | null) => void;
+  loadTeachers: () => Promise<void>;
+  startLearn: () => Promise<string | null>;
+  deleteTeacher: (id: string) => Promise<void>;
+
+  // Optimize (Students) — multi-run
+  optimizeError: string | null;
+  studentDetails: Record<string, StudentDetail>;
+  studentPolls: Record<string, ReturnType<typeof setInterval>>;
+  selectedStudentId: string | null;
+  selectStudent: (id: string | null) => void;
+  loadStudents: () => Promise<void>;
+  startOptimize: (req: OptimizeRequest) => Promise<string | null>;
+  deleteStudent: (id: string) => Promise<void>;
+
+  // Inspector — which run is currently being inspected (from Learn or Optimize)
+  inspectingRunId: string | null;
+  openInspector: (id: string) => void;
+  closeInspector: () => void;
 }
 
 function patchNodeData(
@@ -45,13 +128,15 @@ function patchNodeData(
   );
 }
 
+const POLL_MS = 1500;
+
 export const useStore = create<State>((set, get) => ({
+  mode: "learn",
+  setMode: (m) => set({ mode: m }),
+
   blocks: {},
-  nodes: seedNodes(),
-  edges: seedEdges(),
-  runResult: null,
-  runError: null,
-  running: false,
+  videos: [],
+  dataDir: "",
 
   async loadBlocks() {
     const resp = await fetchBlocks();
@@ -60,12 +145,21 @@ export const useStore = create<State>((set, get) => ({
     set({ blocks });
   },
 
-  setImpl(nodeId, impl) {
-    set({
-      nodes: patchNodeData(get().nodes, nodeId, (d) => ({ ...d, impl })),
-    });
+  async loadVideos() {
+    const resp = await fetchVideos();
+    set({ videos: resp.videos, dataDir: resp.data_dir });
   },
 
+  // ---- Graph editor (unchanged) ----
+  nodes: seedNodes(),
+  edges: seedEdges(),
+  runResult: null,
+  runError: null,
+  running: false,
+
+  setImpl(nodeId, impl) {
+    set({ nodes: patchNodeData(get().nodes, nodeId, (d) => ({ ...d, impl })) });
+  },
   setParam(nodeId, key, value) {
     set({
       nodes: patchNodeData(get().nodes, nodeId, (d) => ({
@@ -74,19 +168,15 @@ export const useStore = create<State>((set, get) => ({
       })),
     });
   },
-
   onNodesChange(changes) {
     set({ nodes: applyNodeChanges(changes, get().nodes) });
   },
-
   onEdgesChange(changes) {
     set({ edges: applyEdgeChanges(changes, get().edges) });
   },
-
   onConnect(connection) {
     set({ edges: addEdge(connection, get().edges) });
   },
-
   async run() {
     const { nodes, edges } = get();
     const graph: GraphSpec = {
@@ -111,4 +201,298 @@ export const useStore = create<State>((set, get) => ({
       });
     }
   },
+
+  // ---- Learn / Teachers ----
+
+  learnForm: {
+    // Start with no chips — the placeholder ("Type and hit Enter to add a
+    // search term") tells the user how to fill them in. Seeding a default
+    // chip makes the form look pre-configured and the user has to remember
+    // to delete it before typing what they actually want.
+    task: "detection",
+    prompts: [],
+    videoPath: "",
+    maxFrames: 60,
+    boxThreshold: 0.3,
+    textThreshold: 0.25,
+    fullResolution: false,
+  },
+  setLearnField(key, value) {
+    set({ learnForm: { ...get().learnForm, [key]: value } });
+  },
+
+  learnError: null,
+  teacherDetails: {},
+  teacherPolls: {},
+  selectedTeacherId: null,
+  selectTeacher: (id) => set({ selectedTeacherId: id }),
+
+  async loadTeachers() {
+    const resp = await fetchRuns();
+    const next: Record<string, RunDetail> = { ...get().teacherDetails };
+    // Merge: keep existing details (which may have stats/progress already
+    // loaded) and just refresh the manifest field. Newly seen ids get a
+    // skeleton detail; the next poll/click will fill in the rest.
+    const seen = new Set<string>();
+    for (const m of resp.runs) {
+      seen.add(m.id);
+      next[m.id] = {
+        manifest: m,
+        stats: next[m.id]?.stats ?? null,
+        progress: next[m.id]?.progress ?? null,
+      };
+    }
+    // Drop ids the backend no longer reports (deletes elsewhere).
+    for (const id of Object.keys(next)) {
+      if (!seen.has(id)) delete next[id];
+    }
+    set({ teacherDetails: next });
+  },
+
+  async startLearn() {
+    const { learnForm } = get();
+    if (!learnForm.videoPath) {
+      set({ learnError: "Pick a video first." });
+      return null;
+    }
+    const cleanPrompts = learnForm.prompts
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (cleanPrompts.length === 0) {
+      set({
+        learnError:
+          "Enter at least one thing to look for (press Enter after typing).",
+      });
+      return null;
+    }
+    set({ learnError: null });
+
+    // Pre-flight: check whether the impls we're about to use need to
+    // download weights. Default detection chain is groundingdino + bytetrack;
+    // segmentation adds sam2-tiny + dinov3-vits16. We only ask the user
+    // about the ones the backend reports as a known download.
+    const implsToCheck =
+      learnForm.task === "detection"
+        ? ["groundingdino", "bytetrack"]
+        : ["groundingdino", "sam2-tiny", "dinov3-vits16", "bytetrack"];
+    try {
+      const statuses = await fetchCacheStatus(implsToCheck);
+      const needsDownload = statuses.filter(
+        (s) => s.known && !s.cached && s.estimated_bytes > 0,
+      );
+      if (needsDownload.length > 0) {
+        const totalMB = needsDownload.reduce(
+          (acc, s) => acc + s.estimated_bytes,
+          0,
+        ) / 1_000_000;
+        const list = needsDownload
+          .map((s) => `  • ${s.impl} (~${Math.round(s.estimated_bytes / 1_000_000)} MB)`)
+          .join("\n");
+        const ok = window.confirm(
+          `This run needs to download model weights:\n\n${list}\n\nTotal: ~${Math.round(totalMB)} MB. Continue?`,
+        );
+        if (!ok) {
+          set({ learnError: "Run cancelled — weights download declined." });
+          return null;
+        }
+      }
+    } catch (e) {
+      // Cache-status check failed — fall through and let /learn run; the
+      // download will still happen, just without the consent gate. Better
+      // than blocking on a transient error.
+      console.warn("cache_status check failed; proceeding without prompt:", e);
+    }
+
+    const req: LearnRequest = {
+      task: learnForm.task,
+      prompts: cleanPrompts,
+      video_path: learnForm.videoPath,
+      max_frames: learnForm.maxFrames ?? undefined,
+      box_threshold: learnForm.boxThreshold,
+      text_threshold: learnForm.textThreshold,
+      full_resolution: learnForm.fullResolution || undefined,
+    };
+    let initial: RunDetail;
+    try {
+      initial = await runLearn(req);
+    } catch (err) {
+      set({ learnError: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+
+    // Insert into the multi-run table; auto-select.
+    set({
+      teacherDetails: { ...get().teacherDetails, [initial.manifest.id]: initial },
+      selectedTeacherId: initial.manifest.id,
+    });
+
+    if (
+      initial.manifest.status === "running" ||
+      initial.manifest.status === "queued"
+    ) {
+      _startTeacherPoll(initial.manifest.id);
+    }
+    return initial.manifest.id;
+  },
+
+  async deleteTeacher(id) {
+    // Stop polling if active.
+    const polls = get().teacherPolls;
+    if (polls[id]) clearInterval(polls[id]);
+    const newPolls = { ...polls };
+    delete newPolls[id];
+
+    const details = { ...get().teacherDetails };
+    delete details[id];
+
+    set({
+      teacherPolls: newPolls,
+      teacherDetails: details,
+      selectedTeacherId: get().selectedTeacherId === id ? null : get().selectedTeacherId,
+    });
+
+    try {
+      await apiDeleteRun(id);
+    } catch (e) {
+      console.error("delete teacher failed", e);
+    }
+    // Keep the local state authoritative — refresh from server.
+    await get().loadTeachers();
+  },
+
+  // ---- Optimize / Students ----
+
+  optimizeError: null,
+  studentDetails: {},
+  studentPolls: {},
+  selectedStudentId: null,
+  selectStudent: (id) => set({ selectedStudentId: id }),
+
+  async loadStudents() {
+    const resp = await fetchStudents();
+    const next: Record<string, StudentDetail> = { ...get().studentDetails };
+    const seen = new Set<string>();
+    for (const m of resp.students) {
+      seen.add(m.id);
+      next[m.id] = {
+        manifest: m,
+        stats: next[m.id]?.stats ?? null,
+        progress: next[m.id]?.progress ?? null,
+      };
+    }
+    for (const id of Object.keys(next)) {
+      if (!seen.has(id)) delete next[id];
+    }
+    set({ studentDetails: next });
+  },
+
+  async startOptimize(req) {
+    set({ optimizeError: null });
+    let initial: StudentDetail;
+    try {
+      initial = await runOptimize(req);
+    } catch (err) {
+      set({ optimizeError: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+    set({
+      studentDetails: { ...get().studentDetails, [initial.manifest.id]: initial },
+      selectedStudentId: initial.manifest.id,
+    });
+    if (initial.manifest.status === "running") {
+      _startStudentPoll(initial.manifest.id);
+    }
+    return initial.manifest.id;
+  },
+
+  async deleteStudent(id) {
+    const polls = get().studentPolls;
+    if (polls[id]) clearInterval(polls[id]);
+    const newPolls = { ...polls };
+    delete newPolls[id];
+
+    const details = { ...get().studentDetails };
+    delete details[id];
+
+    set({
+      studentPolls: newPolls,
+      studentDetails: details,
+      selectedStudentId: get().selectedStudentId === id ? null : get().selectedStudentId,
+    });
+
+    try {
+      await apiDeleteStudent(id);
+    } catch (e) {
+      console.error("delete student failed", e);
+    }
+    await get().loadStudents();
+  },
+
+  // ---- Inspector ----
+  inspectingRunId: null,
+  openInspector: (id) => set({ inspectingRunId: id }),
+  closeInspector: () => set({ inspectingRunId: null }),
 }));
+
+// ---- Poll helpers (live outside the store init so each can re-enter the
+// store via useStore.getState()/.setState()) ------------------------------
+
+function _startTeacherPoll(id: string): void {
+  const existing = useStore.getState().teacherPolls[id];
+  if (existing) return; // already polling
+
+  const handle = setInterval(async () => {
+    try {
+      const latest = await fetchRunDetail(id);
+      useStore.setState((s) => ({
+        teacherDetails: { ...s.teacherDetails, [id]: latest },
+      }));
+      // Keep polling while the run is queued OR running — both are
+      // non-terminal. Stop once the manifest hits a terminal state.
+      const status = latest.manifest.status;
+      if (status !== "queued" && status !== "running") {
+        const polls = useStore.getState().teacherPolls;
+        if (polls[id]) clearInterval(polls[id]);
+        const next = { ...polls };
+        delete next[id];
+        useStore.setState({ teacherPolls: next });
+      }
+    } catch (e) {
+      console.error("teacher poll failed", e);
+    }
+  }, POLL_MS);
+  useStore.setState((s) => ({
+    teacherPolls: { ...s.teacherPolls, [id]: handle },
+  }));
+}
+
+function _startStudentPoll(id: string): void {
+  const existing = useStore.getState().studentPolls[id];
+  if (existing) return;
+
+  const handle = setInterval(async () => {
+    try {
+      const latest = await fetchStudentDetail(id);
+      useStore.setState((s) => ({
+        studentDetails: { ...s.studentDetails, [id]: latest },
+      }));
+      if (latest.manifest.status !== "running") {
+        const polls = useStore.getState().studentPolls;
+        if (polls[id]) clearInterval(polls[id]);
+        const next = { ...polls };
+        delete next[id];
+        useStore.setState({ studentPolls: next });
+      }
+    } catch (e) {
+      console.error("student poll failed", e);
+    }
+  }, POLL_MS);
+  useStore.setState((s) => ({
+    studentPolls: { ...s.studentPolls, [id]: handle },
+  }));
+}
+
+// Keep these exported for components that want to manually seed a poll
+// (e.g. when the page first loads and discovers a still-running run).
+export const startTeacherPoll = _startTeacherPoll;
+export const startStudentPoll = _startStudentPoll;

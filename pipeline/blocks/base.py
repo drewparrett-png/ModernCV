@@ -6,16 +6,24 @@ passes it on. Blocks are intentionally narrow: one job per block.
 
 Implementations live in `pipeline.models.*` and are picked at runtime by name
 from a registry. The block holds the "what" (Detect), the model adapter holds
-the "how" (YOLOv8).
+the "how" (YOLOv8). If no adapter is registered for the chosen impl, the
+block falls back to pass-through and logs a warning — this is what lets you
+compose a partially-built pipeline.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from pipeline.models.adapters import Adapter
+
+log = logging.getLogger(__name__)
 
 
 class BlockKind(str, Enum):
@@ -71,11 +79,15 @@ class FrameBatch:
 
 @dataclass
 class Block:
-    """Abstract base. Subclasses override `process`.
+    """Abstract base. Subclasses pin `kind` and may override `frames` (sources).
 
     `node_id`  — graph-level identifier from the GUI.
     `impl`     — name of the model adapter to use (e.g. "yolov8n").
     `params`   — implementation-specific kwargs from the GUI controls.
+
+    The Block looks up an Adapter for (kind, impl) at setup time. If found,
+    process() delegates to the adapter. If not found, process() passes the
+    batch through unchanged and logs once.
     """
 
     kind: BlockKind
@@ -84,12 +96,24 @@ class Block:
     params: dict[str, Any] = field(default_factory=dict)
 
     def setup(self) -> None:
-        """One-time initialization (load weights, warm up MPS, etc.)."""
+        # Lazy import to break the blocks ↔ models circular dependency.
+        from pipeline.models.registry import make_adapter
+
+        self._adapter: Optional["Adapter"] = make_adapter(self.kind, self.impl, self.params)
+        if self._adapter is None:
+            log.warning(
+                "%s/%s has no registered adapter — passing through.",
+                self.kind.value,
+                self.impl,
+            )
+        else:
+            self._adapter.setup()
 
     def process(self, batch: FrameBatch) -> FrameBatch:
-        raise NotImplementedError(
-            f"{type(self).__name__} (impl={self.impl!r}) is a stub."
-        )
+        if self._adapter is None:
+            return batch
+        return self._adapter.process(batch)
 
     def teardown(self) -> None:
-        """Release resources."""
+        if getattr(self, "_adapter", None) is not None:
+            self._adapter.teardown()
