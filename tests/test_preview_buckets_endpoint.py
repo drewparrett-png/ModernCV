@@ -1,21 +1,9 @@
-"""Tests for the `POST /students/preview-buckets` endpoint (Phase 0.4).
+"""Tests for `POST /projects/{pid}/students/preview-buckets` (Phase 0.4,
+project-scoped under the Phase 1 rearchitecture).
 
-The endpoint is *the* live-preview surface for the New Student form: every
-checkbox toggle and threshold tweak in the GUI debounces into a call here,
-and the user trusts the numbers it returns to predict what the trainer
-will see. Bugs that hurt:
-
-  • Aggregate counts not matching the per-teacher rows (the user catches this
-    visually — the per-teacher numbers should sum to the aggregate).
-  • `treat_empty_as_negative=True` not collapsing uncertain → true_negative
-    in the *response* (the trainer would do the right thing, but the preview
-    would lie).
-  • t_low > t_high accepted silently (would either crash the
-    classify_frames helper or return inverted buckets).
-
-The endpoint reads each teacher's `coco.json` from disk via
-`pipeline.runs.run_dir(...)`; we lay out a couple of fake teacher dirs in a
-tmp tree and point `RUNS_DIR` at it via monkeypatch.
+Same shape as before: the endpoint is the live preview that powers the New
+Student form. We lay out a project + a couple of fake teacher dirs in a
+tmp tree and hit the endpoint via TestClient.
 """
 
 from __future__ import annotations
@@ -27,7 +15,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pipeline import runs as runs_mod
-from server import main as server_main
 from server.main import app
 
 
@@ -35,15 +22,15 @@ from server.main import app
 
 
 def _write_teacher(
-    runs_root: Path,
+    project_id: str,
     teacher_id: str,
     *,
     images: list[dict],
     annotations: list[dict],
     categories: list[dict] | None = None,
 ) -> None:
-    """Lay out a fake completed Teacher dir with a coco.json under it."""
-    tdir = runs_root / teacher_id
+    """Lay out a fake completed Teacher dir inside a project's teachers/ dir."""
+    tdir = runs_mod.run_dir(project_id, teacher_id)
     (tdir / runs_mod.LABELS_DIR).mkdir(parents=True, exist_ok=True)
     manifest = runs_mod.RunManifest(
         id=teacher_id,
@@ -67,28 +54,26 @@ def _write_teacher(
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """TestClient bound to a `runs/` dir under tmp_path.
-
-    `pipeline.runs.run_dir(tid)` defaults `runs_root=RUNS_DIR`, where
-    `RUNS_DIR = Path("runs")` is relative — so `chdir`-ing into tmp_path
-    makes `Path("runs")` resolve under it. Cleaner than monkeypatching the
-    constant (which wouldn't update the captured default arg anyway).
-    """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "runs").mkdir()
     return TestClient(app)
 
 
-def _coco_classifiable(*, n_positive: int, n_uncertain: int, n_true_negative: int) -> tuple[list[dict], list[dict]]:
-    """Build a (images, annotations) pair that bucket exactly as named at
-    the default thresholds (t_high=0.35, t_low=0.15).
+@pytest.fixture()
+def project(client: TestClient) -> str:
+    """Create a project and return its id. Depends on `client` to ensure
+    the chdir + runs/ setup has happened first."""
+    project = runs_mod.create_project(
+        name="Test project",
+        task="detection",
+        prompts=["ball", "player"],
+    )
+    return project.id
 
-    Frame ids are unique across the three buckets so each call produces a
-    self-consistent COCO chunk. Score values:
-      • positive      → 0.9 (well above t_high)
-      • uncertain     → 0.20 (in [t_low, t_high))
-      • true_negative → no annotations
-    """
+
+def _coco_classifiable(
+    *, n_positive: int, n_uncertain: int, n_true_negative: int
+) -> tuple[list[dict], list[dict]]:
     images: list[dict] = []
     anns: list[dict] = []
     nxt_frame = 0
@@ -114,14 +99,12 @@ def _coco_classifiable(*, n_positive: int, n_uncertain: int, n_true_negative: in
 # ---- Tests ----------------------------------------------------------------
 
 
-def test_single_teacher_strict_mode(client: TestClient, tmp_path: Path) -> None:
-    """One teacher, default thresholds, strict mode — bucket counts come back
-    matching what `classify_frames` would compute on the same COCO."""
+def test_single_teacher_strict_mode(client: TestClient, project: str) -> None:
     images, anns = _coco_classifiable(n_positive=3, n_uncertain=2, n_true_negative=1)
-    _write_teacher(tmp_path / "runs", "teacher_a", images=images, annotations=anns)
+    _write_teacher(project, "teacher_a", images=images, annotations=anns)
 
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": ["teacher_a"]},
     )
     assert res.status_code == 200, res.text
@@ -138,25 +121,22 @@ def test_single_teacher_strict_mode(client: TestClient, tmp_path: Path) -> None:
     ]
 
 
-def test_aggregation_across_teachers(client: TestClient, tmp_path: Path) -> None:
-    """Two teachers — aggregate must equal the per-teacher sum, and the
-    class-name union dedupes overlapping vocabularies."""
+def test_aggregation_across_teachers(client: TestClient, project: str) -> None:
     a_imgs, a_anns = _coco_classifiable(n_positive=2, n_uncertain=1, n_true_negative=0)
     b_imgs, b_anns = _coco_classifiable(n_positive=1, n_uncertain=2, n_true_negative=3)
     _write_teacher(
-        tmp_path / "runs", "teacher_a",
+        project, "teacher_a",
         images=a_imgs, annotations=a_anns,
         categories=[{"id": 0, "name": "ball"}, {"id": 1, "name": "player"}],
     )
     _write_teacher(
-        tmp_path / "runs", "teacher_b",
+        project, "teacher_b",
         images=b_imgs, annotations=b_anns,
-        # Overlap on "ball", new "ref" class — verify dedup + ordering.
         categories=[{"id": 0, "name": "ball"}, {"id": 1, "name": "ref"}],
     )
 
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": ["teacher_a", "teacher_b"]},
     )
     assert res.status_code == 200, res.text
@@ -164,30 +144,25 @@ def test_aggregation_across_teachers(client: TestClient, tmp_path: Path) -> None
     assert body["aggregate"]["positive"] == 3
     assert body["aggregate"]["uncertain"] == 3
     assert body["aggregate"]["true_negative"] == 3
-    # Class union: ball appears once (first), player from a, ref from b.
     assert body["aggregate"]["class_names"] == ["ball", "player", "ref"]
     assert body["aggregate"]["n_classes"] == 3
-    # Per-teacher rows preserved in input order.
     assert [t["teacher_id"] for t in body["per_teacher"]] == [
         "teacher_a", "teacher_b",
     ]
 
 
 def test_treat_empty_as_negative_reclassifies_in_response(
-    client: TestClient, tmp_path: Path,
+    client: TestClient, project: str,
 ) -> None:
-    """With `treat_empty_as_negative=True`, the response must collapse
-    uncertain→true_negative — not just at the trainer."""
     images, anns = _coco_classifiable(n_positive=2, n_uncertain=4, n_true_negative=1)
-    _write_teacher(tmp_path / "runs", "teacher_a", images=images, annotations=anns)
+    _write_teacher(project, "teacher_a", images=images, annotations=anns)
 
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": ["teacher_a"], "treat_empty_as_negative": True},
     )
     assert res.status_code == 200, res.text
     body = res.json()
-    # Strict mode would have shown 2/4/1; escape-hatch shows 2/0/5.
     assert body["aggregate"]["positive"] == 2
     assert body["aggregate"]["uncertain"] == 0
     assert body["aggregate"]["true_negative"] == 5
@@ -199,16 +174,12 @@ def test_treat_empty_as_negative_reclassifies_in_response(
     }
 
 
-def test_custom_thresholds_change_buckets(client: TestClient, tmp_path: Path) -> None:
-    """Loosening t_high should let the 0.20-scored anns become positive
-    instead of uncertain — confirms the request thresholds reach
-    classify_frames untouched."""
+def test_custom_thresholds_change_buckets(client: TestClient, project: str) -> None:
     images, anns = _coco_classifiable(n_positive=1, n_uncertain=3, n_true_negative=0)
-    _write_teacher(tmp_path / "runs", "teacher_a", images=images, annotations=anns)
+    _write_teacher(project, "teacher_a", images=images, annotations=anns)
 
-    # Drop t_high below 0.20 → previously-uncertain frames are now positive.
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": ["teacher_a"], "t_high": 0.10, "t_low": 0.05},
     )
     assert res.status_code == 200, res.text
@@ -218,11 +189,9 @@ def test_custom_thresholds_change_buckets(client: TestClient, tmp_path: Path) ->
     assert body["aggregate"]["true_negative"] == 0
 
 
-def test_t_low_above_t_high_rejected(client: TestClient, tmp_path: Path) -> None:
-    """Pydantic validator on PreviewBucketsRequest fires before any
-    teacher I/O happens — should be a 422 with t_low/t_high in the message."""
+def test_t_low_above_t_high_rejected(client: TestClient, project: str) -> None:
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": [], "t_high": 0.10, "t_low": 0.50},
     )
     assert res.status_code == 422
@@ -230,24 +199,27 @@ def test_t_low_above_t_high_rejected(client: TestClient, tmp_path: Path) -> None
     assert "t_low" in detail and "t_high" in detail
 
 
-def test_missing_teacher_returns_404(client: TestClient, tmp_path: Path) -> None:
-    """Caller passes a teacher_id that doesn't exist — surface as 404
-    with the offending id in the body."""
+def test_missing_teacher_returns_404(client: TestClient, project: str) -> None:
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": ["does-not-exist"]},
     )
     assert res.status_code == 404
     assert "does-not-exist" in res.text
 
 
+def test_missing_project_returns_404(client: TestClient) -> None:
+    res = client.post(
+        "/projects/proj_nope/students/preview-buckets",
+        json={"teacher_ids": []},
+    )
+    assert res.status_code == 404
+
+
 def test_teacher_without_coco_returns_400(
-    client: TestClient, tmp_path: Path,
+    client: TestClient, project: str,
 ) -> None:
-    """Teacher dir exists but Learn run never produced a coco.json (e.g.
-    aborted run) — surface as 400, not 500."""
-    runs_root = tmp_path / "runs"
-    tdir = runs_root / "teacher_no_coco"
+    tdir = runs_mod.run_dir(project, "teacher_no_coco")
     (tdir / runs_mod.LABELS_DIR).mkdir(parents=True)
     manifest = runs_mod.RunManifest(
         id="teacher_no_coco",
@@ -255,23 +227,23 @@ def test_teacher_without_coco_returns_400(
         prompt="test",
         video_path="/fake/video.mp4",
         started_at="2026-04-28T12:00:00Z",
-        status="running",  # never finished
+        status="running",
     )
     (tdir / runs_mod.MANIFEST_NAME).write_text(manifest.to_json())
 
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": ["teacher_no_coco"]},
     )
     assert res.status_code == 400
     assert "coco.json" in res.text
 
 
-def test_empty_teacher_list_returns_zero_aggregate(client: TestClient) -> None:
-    """No teachers selected → all-zero aggregate, empty per_teacher.
-    The GUI uses this as the initial state before the user picks anything."""
+def test_empty_teacher_list_returns_zero_aggregate(
+    client: TestClient, project: str
+) -> None:
     res = client.post(
-        "/students/preview-buckets",
+        f"/projects/{project}/students/preview-buckets",
         json={"teacher_ids": []},
     )
     assert res.status_code == 200

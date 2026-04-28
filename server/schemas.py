@@ -8,7 +8,88 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+
+# ---- Projects --------------------------------------------------------------
+
+
+class ProjectCreateRequest(BaseModel):
+    """Body of `POST /projects`.
+
+    `task` and `prompts` are LOCKED at creation. Once a project owns runs,
+    mutating either would invalidate cross-run comparability — so the
+    `PATCH /projects/{pid}` endpoint refuses to touch them.
+    """
+
+    name: str = Field(min_length=1, max_length=80)
+    task: Literal["detection", "segmentation"]
+    prompts: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _normalize_prompts(self) -> "ProjectCreateRequest":
+        # Strip + dedupe while preserving order. Reject empty / whitespace
+        # entries so "[ '' ]" doesn't sneak past min_length=1.
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for p in self.prompts:
+            s = p.strip()
+            if not s:
+                raise ValueError("prompt entries cannot be empty")
+            if s in seen:
+                continue
+            seen.add(s)
+            cleaned.append(s)
+        self.prompts = cleaned
+        return self
+
+
+class ProjectPatchRequest(BaseModel):
+    """Body of `PATCH /projects/{pid}`. Only `name` is mutable.
+
+    `extra="forbid"` is what enforces the lock — sending `task` or
+    `prompts` here yields a 422 with a clear message, instead of being
+    silently dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=80)
+
+
+class ProjectModel(BaseModel):
+    id: str
+    name: str
+    task: Literal["detection", "segmentation"]
+    prompts: list[str]
+    created_at: str  # ISO 8601 UTC
+
+
+class ProjectSummaryModel(BaseModel):
+    """Lightweight row for the project picker.
+
+    The four counters are computed by walking the project directory once
+    per `GET /projects` call. With dozens of teachers per project that's
+    cheap; if we ever blow past a few hundred runs per project we'll cache
+    the counts on `project.json` and update on write.
+    """
+
+    id: str
+    name: str
+    task: Literal["detection", "segmentation"]
+    prompts: list[str]
+    created_at: str
+    n_running: int = 0
+    n_teacher_datasets: int = 0
+    n_human_reviewed_datasets: int = 0
+    n_students: int = 0
+
+
+class ProjectsResponse(BaseModel):
+    projects: list[ProjectSummaryModel] = Field(default_factory=list)
+
+
+# ---- Graph editor (legacy) -------------------------------------------------
 
 
 class NodeSpecModel(BaseModel):
@@ -43,16 +124,13 @@ class BlocksResponse(BaseModel):
 
 
 class LearnRequest(BaseModel):
-    """Inputs from the Learn wizard. Backend assembles the graph from these."""
+    """Inputs from the Learn wizard.
 
-    task: str  # "detection" | "segmentation"
-    # Either:
-    #   prompts : list[str]  — preferred; one chip per class. Labels on
-    #                          detections will be one of these exact strings.
-    #   prompt  : str        — legacy single-phrase input; still accepted.
-    # If both are provided, `prompts` wins.
-    prompt: Optional[str] = None
-    prompts: Optional[list[str]] = None
+    Project-scoped (Phase 1): `task` and `prompts` come from the parent
+    project, NOT from this request — so the request only carries the
+    per-run knobs. Posted to `POST /projects/{pid}/learn`.
+    """
+
     video_path: str
     # Per-task model overrides — optional; defaults are picked by the backend
     # so the user can stay in pure "fill three fields and go" mode.
@@ -62,9 +140,8 @@ class LearnRequest(BaseModel):
     track_impl: Optional[str] = None
     max_frames: Optional[int] = None  # cap for fast iteration
     # Detector confidence knobs. Both default to None ⇒ backend uses the
-    # adapter's built-in defaults (0.30 / 0.25 for GroundingDINO). Useful
-    # to lower for small-object prompts ("soccer ball") that score below
-    # the default threshold.
+    # adapter's built-in defaults (0.30 / 0.25 for GroundingDINO). Phase 2
+    # will drop these in favor of a fixed low floor + post-hoc filtering.
     box_threshold: Optional[float] = None
     text_threshold: Optional[float] = None
     # When True, the GroundingDINO adapter passes frames to the model with
@@ -75,9 +152,16 @@ class LearnRequest(BaseModel):
 
 
 class RunManifestModel(BaseModel):
-    """Mirror of pipeline.runs.RunManifest for API output."""
+    """Mirror of pipeline.runs.RunManifest for API output.
+
+    Project-scoped (Phase 1): `project_id` identifies the parent project.
+    `review_status` is computed by the endpoint at response time (it
+    needs disk access — `has_any_rejections` — and the pydantic model
+    stays a pure data carrier).
+    """
 
     id: str
+    project_id: str
     task: str
     prompt: str
     video_path: str
@@ -87,28 +171,7 @@ class RunManifestModel(BaseModel):
     models: dict[str, str] = Field(default_factory=dict)
     error: Optional[str] = None
     approved_at: Optional[str] = None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def review_status(self) -> Literal["unreviewed", "reviewed", "approved"]:
-        """Three-state human-review summary, derived at serialise time.
-
-        - "approved": `approved_at` is populated (one-click approval stamp).
-        - "reviewed": no approval stamp, but at least one rejection on disk.
-        - "unreviewed": neither — a fresh, untouched run.
-
-        The rejection check uses `has_any_rejections` which short-circuits
-        on file existence + a single non-empty list, so this stays cheap
-        enough to serialise on every /runs entry. If 50-run lists ever show
-        latency, cache the bool in the manifest at write time.
-        """
-        from pipeline import runs as runs_mod
-
-        if self.approved_at is not None:
-            return "approved"
-        if runs_mod.has_any_rejections(runs_mod.run_dir(self.id)):
-            return "reviewed"
-        return "unreviewed"
+    review_status: Literal["unreviewed", "reviewed", "approved"] = "unreviewed"
 
 
 class PerClassStatsModel(BaseModel):
@@ -256,6 +319,7 @@ class OptimizeRequest(BaseModel):
 
 class StudentManifestModel(BaseModel):
     id: str
+    project_id: str
     train_teacher_ids: list[str] = Field(default_factory=list)
     eval_teacher_ids: list[str] = Field(default_factory=list)
     task: str

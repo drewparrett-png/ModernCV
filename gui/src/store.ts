@@ -11,16 +11,20 @@ import {
 } from "reactflow";
 
 import {
+  createProject as apiCreateProject,
+  deleteProject as apiDeleteProject,
   deleteRun as apiDeleteRun,
   deleteStudent as apiDeleteStudent,
   fetchArchitectures,
   fetchBlocks,
   fetchCacheStatus,
+  fetchProjects,
   fetchRunDetail,
   fetchRuns,
   fetchStudentDetail,
   fetchStudents,
   fetchVideos,
+  renameProject as apiRenameProject,
   runGraph,
   runLearn,
   runOptimize,
@@ -33,34 +37,27 @@ import type {
   LearnRequest,
   Mode,
   OptimizeRequest,
+  Project,
+  ProjectCreateRequest,
+  ProjectSummary,
   RunDetail,
   RunResponse,
   StudentDetail,
-  Task,
 } from "./types";
 
 interface LearnFormState {
-  task: Task;
-  /** One chip per class — each is a complete phrase ("soccer ball",
-   *  "player"). The detector treats each chip atomically and labels
-   *  detections with the matching chip text. */
-  prompts: string[];
   videoPath: string;
   maxFrames: number | null;
   /** Confidence threshold for box scores. Defaults match the GroundingDINO
    *  adapter's defaults (0.30 / 0.25); lower box_threshold to ~0.15-0.20
-   *  for small-object prompts like "soccer ball" that score lower than
-   *  player-sized prompts. */
+   *  for small-object prompts. Phase 2 will drop these. */
   boxThreshold: number;
   textThreshold: number;
-  /** Skip the GroundingDINO HF processor's resize step. The default
-   *  shrinks 1080p footage to ~1333×750, which blurs small targets like
-   *  the soccer ball. Tradeoff: ~2× per-frame latency. */
   fullResolution: boolean;
 }
 
 interface State {
-  // Top-level mode
+  // Top-level mode (within a project)
   mode: Mode;
   setMode: (m: Mode) => void;
 
@@ -68,14 +65,23 @@ interface State {
   blocks: Record<string, string[]>;
   videos: string[];
   dataDir: string;
-  /** Names of every registered Student-trainer architecture (Phase 1.4).
-   *  Fetched once on mount via `loadArchitectures`; drives the GUI's
-   *  architecture <select>. Empty until the fetch resolves — components
-   *  fall back to the spec default ("yolov8n") in that window. */
   architectures: string[];
   loadBlocks: () => Promise<void>;
   loadVideos: () => Promise<void>;
   loadArchitectures: () => Promise<void>;
+
+  // ---- Projects (Phase 1) ------------------------------------------------
+  projects: ProjectSummary[];
+  currentProjectId: string | null;
+  projectError: string | null;
+  loadProjects: () => Promise<void>;
+  setCurrentProject: (id: string | null) => void;
+  createProject: (req: ProjectCreateRequest) => Promise<Project | null>;
+  renameProject: (id: string, name: string) => Promise<void>;
+  deleteProject: (id: string) => Promise<void>;
+  /** Convenience selector — current project record from the summary list,
+   *  or null if no project is selected / not yet loaded. */
+  getCurrentProject: () => ProjectSummary | null;
 
   // Graph editor (existing)
   nodes: Node<BlockNodeData>[];
@@ -90,26 +96,22 @@ interface State {
   onConnect: (connection: Connection) => void;
   run: () => Promise<void>;
 
-  // Learn (Teachers) — multi-run
+  // Learn (Teachers) — multi-run, current-project-scoped
   learnForm: LearnFormState;
   setLearnField: <K extends keyof LearnFormState>(
     key: K,
     value: LearnFormState[K],
   ) => void;
   learnError: string | null;
-  /** All runs visible to the UI: either persisted (loaded from /runs) or
-   *  freshly kicked off this session. Keyed by id. */
   teacherDetails: Record<string, RunDetail>;
-  /** Active polling handles per teacher run id. */
   teacherPolls: Record<string, ReturnType<typeof setInterval>>;
-  /** Currently selected teacher in the Learn sidebar. */
   selectedTeacherId: string | null;
   selectTeacher: (id: string | null) => void;
   loadTeachers: () => Promise<void>;
   startLearn: () => Promise<string | null>;
   deleteTeacher: (id: string) => Promise<void>;
 
-  // Optimize (Students) — multi-run
+  // Optimize (Students) — multi-run, current-project-scoped
   optimizeError: string | null;
   studentDetails: Record<string, StudentDetail>;
   studentPolls: Record<string, ReturnType<typeof setInterval>>;
@@ -119,21 +121,14 @@ interface State {
   startOptimize: (req: OptimizeRequest) => Promise<string | null>;
   deleteStudent: (id: string) => Promise<void>;
 
-  // Optimize-mode tab routing (Phase 3). Compare is a sub-tab inside
-  // Optimize, *not* a top-level mode — keeps the existing Learn/Optimize
-  // shell untouched.
+  // Optimize-mode tab routing (Phase 3)
   optimizeTab: "new" | "compare";
   setOptimizeTab: (t: "new" | "compare") => void;
-  /** Set of Student ids selected in the Compare tab. Lives in the store
-   *  (not local state) so opening the Compare tab on a fresh mount
-   *  doesn't blow away the user's selection while toggling between New
-   *  and Compare sub-tabs. Spec: "persist nothing" — this resets on
-   *  reload because Zustand state is in-memory only. */
   compareStudentIds: string[];
   toggleCompareStudent: (id: string) => void;
   clearCompareStudents: () => void;
 
-  // Inspector — which run is currently being inspected (from Learn or Optimize)
+  // Inspector
   inspectingRunId: string | null;
   openInspector: (id: string) => void;
   closeInspector: () => void;
@@ -173,13 +168,95 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async loadArchitectures() {
-    // Phase 1.4: pulls `pipeline.students.list_trainers()` from the server
-    // once on mount. The architecture <select> in the New Student form
-    // reads this; when it's empty (fetch failed or hasn't returned yet)
-    // the form falls back to the spec default ("yolov8n") so the user
-    // can still kick off a run.
-    const resp = await fetchArchitectures();
+    const pid = get().currentProjectId;
+    if (!pid) {
+      // architectures list is project-scoped via the URL; if no project is
+      // selected we can't fetch yet — components fall back to "yolov8n".
+      return;
+    }
+    const resp = await fetchArchitectures(pid);
     set({ architectures: resp.architectures });
+  },
+
+  // ---- Projects ----
+  projects: [],
+  currentProjectId: null,
+  projectError: null,
+
+  async loadProjects() {
+    try {
+      const resp = await fetchProjects();
+      set({ projects: resp.projects, projectError: null });
+    } catch (e) {
+      set({ projectError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  setCurrentProject(id) {
+    if (get().currentProjectId === id) return;
+    // Switching project invalidates teacher/student state — clear it so
+    // stale rows don't bleed across projects. Polls are also cancelled.
+    const polls = { ...get().teacherPolls, ...get().studentPolls };
+    for (const handle of Object.values(polls)) {
+      clearInterval(handle);
+    }
+    set({
+      currentProjectId: id,
+      teacherDetails: {},
+      teacherPolls: {},
+      selectedTeacherId: null,
+      studentDetails: {},
+      studentPolls: {},
+      selectedStudentId: null,
+      compareStudentIds: [],
+      mode: "learn",
+      learnError: null,
+      optimizeError: null,
+    });
+    if (id) {
+      // Fire and forget — the UI shows skeletons during these.
+      void get().loadTeachers();
+      void get().loadStudents();
+      void get().loadArchitectures();
+    }
+  },
+
+  async createProject(req) {
+    try {
+      const project = await apiCreateProject(req);
+      await get().loadProjects();
+      return project;
+    } catch (e) {
+      set({ projectError: e instanceof Error ? e.message : String(e) });
+      return null;
+    }
+  },
+
+  async renameProject(id, name) {
+    try {
+      await apiRenameProject(id, name);
+      await get().loadProjects();
+    } catch (e) {
+      set({ projectError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  async deleteProject(id) {
+    try {
+      await apiDeleteProject(id);
+      if (get().currentProjectId === id) {
+        get().setCurrentProject(null);
+      }
+      await get().loadProjects();
+    } catch (e) {
+      set({ projectError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  getCurrentProject() {
+    const pid = get().currentProjectId;
+    if (!pid) return null;
+    return get().projects.find((p) => p.id === pid) ?? null;
   },
 
   // ---- Graph editor (unchanged) ----
@@ -237,12 +314,6 @@ export const useStore = create<State>((set, get) => ({
   // ---- Learn / Teachers ----
 
   learnForm: {
-    // Start with no chips — the placeholder ("Type and hit Enter to add a
-    // search term") tells the user how to fill them in. Seeding a default
-    // chip makes the form look pre-configured and the user has to remember
-    // to delete it before typing what they actually want.
-    task: "detection",
-    prompts: [],
     videoPath: "",
     maxFrames: 60,
     boxThreshold: 0.3,
@@ -260,11 +331,10 @@ export const useStore = create<State>((set, get) => ({
   selectTeacher: (id) => set({ selectedTeacherId: id }),
 
   async loadTeachers() {
-    const resp = await fetchRuns();
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const resp = await fetchRuns(pid);
     const next: Record<string, RunDetail> = { ...get().teacherDetails };
-    // Merge: keep existing details (which may have stats/progress already
-    // loaded) and just refresh the manifest field. Newly seen ids get a
-    // skeleton detail; the next poll/click will fill in the rest.
     const seen = new Set<string>();
     for (const m of resp.runs) {
       seen.add(m.id);
@@ -274,7 +344,6 @@ export const useStore = create<State>((set, get) => ({
         progress: next[m.id]?.progress ?? null,
       };
     }
-    // Drop ids the backend no longer reports (deletes elsewhere).
     for (const id of Object.keys(next)) {
       if (!seen.has(id)) delete next[id];
     }
@@ -282,29 +351,26 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async startLearn() {
+    const pid = get().currentProjectId;
+    if (!pid) {
+      set({ learnError: "No project selected." });
+      return null;
+    }
+    const project = get().getCurrentProject();
+    if (!project) {
+      set({ learnError: "Project not loaded yet — try again in a moment." });
+      return null;
+    }
     const { learnForm } = get();
     if (!learnForm.videoPath) {
       set({ learnError: "Pick a video first." });
       return null;
     }
-    const cleanPrompts = learnForm.prompts
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0);
-    if (cleanPrompts.length === 0) {
-      set({
-        learnError:
-          "Enter at least one thing to look for (press Enter after typing).",
-      });
-      return null;
-    }
     set({ learnError: null });
 
-    // Pre-flight: check whether the impls we're about to use need to
-    // download weights. Default detection chain is groundingdino + bytetrack;
-    // segmentation adds sam2-tiny + dinov3-vits16. We only ask the user
-    // about the ones the backend reports as a known download.
+    // Pre-flight cache check (unchanged from pre-Phase-1 behaviour).
     const implsToCheck =
-      learnForm.task === "detection"
+      project.task === "detection"
         ? ["groundingdino", "bytetrack"]
         : ["groundingdino", "sam2-tiny", "dinov3-vits16", "bytetrack"];
     try {
@@ -329,15 +395,10 @@ export const useStore = create<State>((set, get) => ({
         }
       }
     } catch (e) {
-      // Cache-status check failed — fall through and let /learn run; the
-      // download will still happen, just without the consent gate. Better
-      // than blocking on a transient error.
       console.warn("cache_status check failed; proceeding without prompt:", e);
     }
 
     const req: LearnRequest = {
-      task: learnForm.task,
-      prompts: cleanPrompts,
       video_path: learnForm.videoPath,
       max_frames: learnForm.maxFrames ?? undefined,
       box_threshold: learnForm.boxThreshold,
@@ -346,13 +407,12 @@ export const useStore = create<State>((set, get) => ({
     };
     let initial: RunDetail;
     try {
-      initial = await runLearn(req);
+      initial = await runLearn(pid, req);
     } catch (err) {
       set({ learnError: err instanceof Error ? err.message : String(err) });
       return null;
     }
 
-    // Insert into the multi-run table; auto-select.
     set({
       teacherDetails: { ...get().teacherDetails, [initial.manifest.id]: initial },
       selectedTeacherId: initial.manifest.id,
@@ -362,13 +422,14 @@ export const useStore = create<State>((set, get) => ({
       initial.manifest.status === "running" ||
       initial.manifest.status === "queued"
     ) {
-      _startTeacherPoll(initial.manifest.id);
+      _startTeacherPoll(pid, initial.manifest.id);
     }
     return initial.manifest.id;
   },
 
   async deleteTeacher(id) {
-    // Stop polling if active.
+    const pid = get().currentProjectId;
+    if (!pid) return;
     const polls = get().teacherPolls;
     if (polls[id]) clearInterval(polls[id]);
     const newPolls = { ...polls };
@@ -384,11 +445,10 @@ export const useStore = create<State>((set, get) => ({
     });
 
     try {
-      await apiDeleteRun(id);
+      await apiDeleteRun(pid, id);
     } catch (e) {
       console.error("delete teacher failed", e);
     }
-    // Keep the local state authoritative — refresh from server.
     await get().loadTeachers();
   },
 
@@ -401,7 +461,9 @@ export const useStore = create<State>((set, get) => ({
   selectStudent: (id) => set({ selectedStudentId: id }),
 
   async loadStudents() {
-    const resp = await fetchStudents();
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const resp = await fetchStudents(pid);
     const next: Record<string, StudentDetail> = { ...get().studentDetails };
     const seen = new Set<string>();
     for (const m of resp.students) {
@@ -419,10 +481,15 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async startOptimize(req) {
+    const pid = get().currentProjectId;
+    if (!pid) {
+      set({ optimizeError: "No project selected." });
+      return null;
+    }
     set({ optimizeError: null });
     let initial: StudentDetail;
     try {
-      initial = await runOptimize(req);
+      initial = await runOptimize(pid, req);
     } catch (err) {
       set({ optimizeError: err instanceof Error ? err.message : String(err) });
       return null;
@@ -432,12 +499,14 @@ export const useStore = create<State>((set, get) => ({
       selectedStudentId: initial.manifest.id,
     });
     if (initial.manifest.status === "running") {
-      _startStudentPoll(initial.manifest.id);
+      _startStudentPoll(pid, initial.manifest.id);
     }
     return initial.manifest.id;
   },
 
   async deleteStudent(id) {
+    const pid = get().currentProjectId;
+    if (!pid) return;
     const polls = get().studentPolls;
     if (polls[id]) clearInterval(polls[id]);
     const newPolls = { ...polls };
@@ -453,7 +522,7 @@ export const useStore = create<State>((set, get) => ({
     });
 
     try {
-      await apiDeleteStudent(id);
+      await apiDeleteStudent(pid, id);
     } catch (e) {
       console.error("delete student failed", e);
     }
@@ -480,21 +549,18 @@ export const useStore = create<State>((set, get) => ({
   closeInspector: () => set({ inspectingRunId: null }),
 }));
 
-// ---- Poll helpers (live outside the store init so each can re-enter the
-// store via useStore.getState()/.setState()) ------------------------------
+// ---- Poll helpers ----------------------------------------------------------
 
-function _startTeacherPoll(id: string): void {
+function _startTeacherPoll(projectId: string, id: string): void {
   const existing = useStore.getState().teacherPolls[id];
-  if (existing) return; // already polling
+  if (existing) return;
 
   const handle = setInterval(async () => {
     try {
-      const latest = await fetchRunDetail(id);
+      const latest = await fetchRunDetail(projectId, id);
       useStore.setState((s) => ({
         teacherDetails: { ...s.teacherDetails, [id]: latest },
       }));
-      // Keep polling while the run is queued OR running — both are
-      // non-terminal. Stop once the manifest hits a terminal state.
       const status = latest.manifest.status;
       if (status !== "queued" && status !== "running") {
         const polls = useStore.getState().teacherPolls;
@@ -512,13 +578,13 @@ function _startTeacherPoll(id: string): void {
   }));
 }
 
-function _startStudentPoll(id: string): void {
+function _startStudentPoll(projectId: string, id: string): void {
   const existing = useStore.getState().studentPolls[id];
   if (existing) return;
 
   const handle = setInterval(async () => {
     try {
-      const latest = await fetchStudentDetail(id);
+      const latest = await fetchStudentDetail(projectId, id);
       useStore.setState((s) => ({
         studentDetails: { ...s.studentDetails, [id]: latest },
       }));
@@ -538,7 +604,5 @@ function _startStudentPoll(id: string): void {
   }));
 }
 
-// Keep these exported for components that want to manually seed a poll
-// (e.g. when the page first loads and discovers a still-running run).
 export const startTeacherPoll = _startTeacherPoll;
 export const startStudentPoll = _startStudentPoll;

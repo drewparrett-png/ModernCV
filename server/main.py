@@ -1,26 +1,48 @@
 """FastAPI app — bridges the React Flow GUI to the Python runner.
 
+Project-scoped surface (Phase 1 rearchitecture).
+
 Endpoints:
-    GET  /health                          — liveness
-    GET  /blocks                          — what blocks exist + impls each supports
-    GET  /videos                          — videos found in data/
-    POST /run                             — execute an arbitrary graph (Graph Editor mode)
-    POST /learn                           — execute a Learn-mode pipeline (writes a run dir)
-    GET  /runs                            — list Teacher run manifests
-    GET  /runs/{id}                       — manifest + stats for one run
-    GET  /runs/{id}/labels                — per_frame.jsonl content (for Inspector)
-    GET  /runs/{id}/frame/{idx}           — JPEG of frame idx (?source=raw|overlay)
-    GET  /runs/{id}/overlay.mp4           — the overlay video file
+    GET  /health
+    GET  /blocks
+    GET  /videos
+    GET  /models/cache_status
+    POST /run                                     — graph editor (legacy)
+
+    POST /projects                                — create
+    GET  /projects                                — list (with summary counters)
+    GET  /projects/{pid}                          — full project record
+    PATCH /projects/{pid}                         — rename only
+    DELETE /projects/{pid}                        — recursive delete
+
+    POST /projects/{pid}/learn                    — kick a Teacher run
+    GET  /projects/{pid}/runs                     — list Teacher runs in this project
+    GET  /projects/{pid}/runs/{rid}               — manifest + stats + progress
+    GET  /projects/{pid}/runs/{rid}/labels        — per_frame.jsonl
+    GET  /projects/{pid}/runs/{rid}/frame/{idx}   — JPEG of frame idx
+    GET  /projects/{pid}/runs/{rid}/overlay.mp4
+    GET  /projects/{pid}/runs/{rid}/rejections
+    POST /projects/{pid}/runs/{rid}/rejections/toggle
+    POST /projects/{pid}/runs/{rid}/approve
+    POST /projects/{pid}/runs/{rid}/unapprove
+    DELETE /projects/{pid}/runs/{rid}
+
+    POST /projects/{pid}/optimize                 — kick a Student run
+    GET  /projects/{pid}/students                 — list Students in this project
+    GET  /projects/{pid}/students/{sid}           — manifest + stats + progress
+    GET  /projects/{pid}/students/architectures   — registered trainer names
+    POST /projects/{pid}/students/preview-buckets — live bucket preview
+    DELETE /projects/{pid}/students/{sid}
 """
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 import cv2
 from fastapi import FastAPI, HTTPException, Query
@@ -36,12 +58,8 @@ from pipeline.learn import (
 )
 from pipeline.models.registry import REGISTRY
 from pipeline.optimize import run_optimize_in_background
-# Importing the students package triggers each trainer module's
-# `@register(...)` side effect — we read `list_trainers()` for the
-# `/students/architectures` endpoint so the dropdown is populated by
-# whatever's actually wired today, not a hardcoded list.
-from pipeline.students import list_trainers
 from pipeline.runner import run as run_graph
+from pipeline.students import list_trainers
 from server.schemas import (
     ApproveResponse,
     ArchitecturesResponse,
@@ -55,6 +73,11 @@ from server.schemas import (
     PreviewBucketsPerTeacher,
     PreviewBucketsRequest,
     PreviewBucketsResponse,
+    ProjectCreateRequest,
+    ProjectModel,
+    ProjectPatchRequest,
+    ProjectsResponse,
+    ProjectSummaryModel,
     RejectionsResponse,
     RejectToggleRequest,
     RunDetail,
@@ -77,22 +100,6 @@ DATA_DIR = Path("data")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Startup / shutdown hooks.
-
-    Startup:
-      1. Sweep the runs directory for any run still flagged 'running' or
-         'queued' from a prior process — workers are daemon threads + the
-         queue is in-memory, so neither survives a restart. Without this
-         sweep, the UI shows a forever-spinning row that never updates.
-      2. Spawn the singleton Teacher queue worker so the first /learn
-         request doesn't pay the worker-startup latency.
-
-    Shutdown:
-      • Push a sentinel onto the Learn queue and join briefly. The worker
-        is daemon-flagged so it'll be killed on hard exit anyway, but
-        graceful drain on a clean shutdown means the next-startup sweep
-        has less to do.
-    """
     n = runs_mod.mark_stale_runs_failed()
     if n:
         log.info("startup: marked %d stale runs as failed", n)
@@ -105,13 +112,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="ModernCV", version="0.1.0", lifespan=lifespan)
 
-# Permissive in dev — tighten in production.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---- Health / discovery ---------------------------------------------------
 
 
 @app.get("/health")
@@ -121,12 +130,6 @@ def health() -> dict[str, str]:
 
 @app.get("/videos")
 def videos() -> dict:
-    """List video files in data/ — used by the InputNode dropdown.
-
-    Paths are returned relative to the project root so they can be passed
-    straight to the OpenCV reader as-is. Sorted alphabetically; nested
-    directories (e.g. data/dfl/clip_001.mp4) are walked recursively.
-    """
     if not DATA_DIR.exists():
         return {"videos": [], "data_dir": str(DATA_DIR.resolve()), "count": 0}
     found = sorted(
@@ -139,13 +142,6 @@ def videos() -> dict:
 
 @app.get("/models/cache_status", response_model=CacheStatusResponse)
 def cache_status_endpoint(impls: str = "") -> CacheStatusResponse:
-    """Per-impl cache status: cached + estimated download size.
-
-    Lets the GUI ask "are you OK with a ~700MB download?" before kicking
-    off a Learn run when the user is on a fresh machine. `impls` is a
-    comma-separated list, e.g. "groundingdino,sam2-tiny,dinov3-vits16".
-    Unknown impls are reported as already-cached / 0 bytes.
-    """
     impl_list = [s.strip() for s in impls.split(",") if s.strip()]
     return CacheStatusResponse(
         impls=[
@@ -167,6 +163,7 @@ def blocks() -> BlocksResponse:
 
 @app.post("/run")
 def run_endpoint(req: RunRequest) -> dict:
+    """Graph-editor passthrough — kept for the dev tools page."""
     graph = GraphSpec.from_dict(req.graph.model_dump())
     n_frames = 0
     last_error: str | None = None
@@ -174,7 +171,6 @@ def run_endpoint(req: RunRequest) -> dict:
         for _batch in run_graph(graph):
             n_frames += 1
     except NotImplementedError as e:
-        # Expected during scaffold — surface which block stub bit us.
         last_error = str(e)
     return {
         "frames_processed": n_frames,
@@ -183,24 +179,104 @@ def run_endpoint(req: RunRequest) -> dict:
     }
 
 
-# ---- Learn / Optimize / Inspector ------------------------------------------
+# ---- Projects -------------------------------------------------------------
 
 
-@app.post("/learn", response_model=RunDetail)
-def learn_endpoint(req: LearnRequest) -> RunDetail:
-    """Kick off a Learn-mode run in a background thread; return the
-    initial manifest immediately so the client can poll /runs/{id} for
-    progress.
+def _require_project(project_id: str) -> runs_mod.Project:
+    pdir = runs_mod.project_dir(project_id)
+    if not (pdir / runs_mod.PROJECT_FILE).exists():
+        raise HTTPException(status_code=404, detail=f"no such project: {project_id}")
+    return runs_mod.read_project(pdir)
 
-    With real models wired (GroundingDINO weight download on first run,
-    multi-second per-frame inference) a synchronous endpoint would time
-    out browsers. The polling endpoint is /runs/{id}.
-    """
+
+@app.post("/projects", response_model=ProjectModel)
+def create_project_endpoint(req: ProjectCreateRequest) -> ProjectModel:
+    try:
+        project = runs_mod.create_project(
+            name=req.name,
+            task=req.task,
+            prompts=req.prompts,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ProjectModel(**asdict(project))
+
+
+@app.get("/projects", response_model=ProjectsResponse)
+def list_projects_endpoint() -> ProjectsResponse:
+    out: list[ProjectSummaryModel] = []
+    for p in runs_mod.list_projects():
+        counts = runs_mod.project_summary_counts(p.id)
+        out.append(
+            ProjectSummaryModel(
+                id=p.id,
+                name=p.name,
+                task=p.task,  # type: ignore[arg-type]
+                prompts=p.prompts,
+                created_at=p.created_at,
+                **counts,
+            )
+        )
+    return ProjectsResponse(projects=out)
+
+
+@app.get("/projects/{project_id}", response_model=ProjectModel)
+def get_project_endpoint(project_id: str) -> ProjectModel:
+    project = _require_project(project_id)
+    return ProjectModel(**asdict(project))
+
+
+@app.patch("/projects/{project_id}", response_model=ProjectModel)
+def patch_project_endpoint(project_id: str, req: ProjectPatchRequest) -> ProjectModel:
+    _require_project(project_id)
+    project = runs_mod.rename_project(project_id, req.name)
+    return ProjectModel(**asdict(project))
+
+
+@app.delete("/projects/{project_id}")
+def delete_project_endpoint(project_id: str) -> dict:
+    _require_project(project_id)
+    runs_mod.delete_project(project_id)
+    return {"deleted": project_id}
+
+
+# ---- Per-project: Teacher runs --------------------------------------------
+
+
+def _manifest_to_model(
+    project_id: str, manifest: runs_mod.RunManifest, rdir: Path
+) -> RunManifestModel:
+    """Wrap a RunManifest as the API model with `project_id` and the
+    review_status derived from disk."""
+    return RunManifestModel(
+        project_id=project_id,
+        review_status=runs_mod.derive_review_status(rdir),  # type: ignore[arg-type]
+        **manifest.__dict__,
+    )
+
+
+def _run_detail(project_id: str, run_id: str) -> RunDetail:
+    rdir = runs_mod.run_dir(project_id, run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+    manifest = runs_mod.read_manifest(rdir)
+    stats = runs_mod.read_stats(rdir)
+    progress = runs_mod.read_progress(rdir)
+    return RunDetail(
+        manifest=_manifest_to_model(project_id, manifest, rdir),
+        stats=RunStatsModel(**stats.__dict__) if stats else None,
+        progress=RunProgressModel(**progress.__dict__) if progress else None,
+    )
+
+
+@app.post("/projects/{project_id}/learn", response_model=RunDetail)
+def learn_endpoint(project_id: str, req: LearnRequest) -> RunDetail:
+    project = _require_project(project_id)
     try:
         manifest = run_learn_in_background(
-            task=req.task,
-            prompt=req.prompt,
-            prompts=req.prompts,
+            project_id=project_id,
+            task=project.task,
+            prompts=project.prompts,
             video_path=req.video_path,
             detect_impl=req.detect_impl,
             segment_impl=req.segment_impl,
@@ -213,58 +289,47 @@ def learn_endpoint(req: LearnRequest) -> RunDetail:
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return _run_detail(manifest.id)
+    return _run_detail(project_id, manifest.id)
 
 
-@app.get("/runs", response_model=RunsResponse)
-def runs_list() -> RunsResponse:
-    return RunsResponse(
-        runs=[RunManifestModel(**m.__dict__) for m in runs_mod.list_runs()]
+@app.get("/projects/{project_id}/runs", response_model=RunsResponse)
+def runs_list(project_id: str) -> RunsResponse:
+    _require_project(project_id)
+    runs: list[RunManifestModel] = []
+    for m in runs_mod.list_runs(project_id):
+        rdir = runs_mod.run_dir(project_id, m.id)
+        runs.append(_manifest_to_model(project_id, m, rdir))
+    return RunsResponse(runs=runs)
+
+
+@app.get("/projects/{project_id}/runs/{run_id}", response_model=RunDetail)
+def run_detail(project_id: str, run_id: str) -> RunDetail:
+    _require_project(project_id)
+    return _run_detail(project_id, run_id)
+
+
+@app.get("/projects/{project_id}/runs/{run_id}/labels")
+def run_labels(project_id: str, run_id: str) -> Response:
+    _require_project(project_id)
+    p = (
+        runs_mod.run_dir(project_id, run_id)
+        / runs_mod.LABELS_DIR
+        / runs_mod.PER_FRAME_NAME
     )
-
-
-@app.get("/runs/{run_id}", response_model=RunDetail)
-def run_detail(run_id: str) -> RunDetail:
-    return _run_detail(run_id)
-
-
-def _run_detail(run_id: str) -> RunDetail:
-    rdir = runs_mod.run_dir(run_id)
-    if not (rdir / runs_mod.MANIFEST_NAME).exists():
-        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
-    manifest = runs_mod.read_manifest(rdir)
-    stats = runs_mod.read_stats(rdir)
-    progress = runs_mod.read_progress(rdir)
-    return RunDetail(
-        manifest=RunManifestModel(**manifest.__dict__),
-        stats=RunStatsModel(**stats.__dict__) if stats else None,
-        progress=RunProgressModel(**progress.__dict__) if progress else None,
-    )
-
-
-@app.get("/runs/{run_id}/labels")
-def run_labels(run_id: str) -> Response:
-    """Serve labels/per_frame.jsonl as plain text. Frontend slices client-side."""
-    p = runs_mod.run_dir(run_id) / runs_mod.LABELS_DIR / runs_mod.PER_FRAME_NAME
     if not p.exists():
         raise HTTPException(status_code=404, detail="no per-frame labels yet")
     return Response(content=p.read_bytes(), media_type="application/x-ndjson")
 
 
-@app.get("/runs/{run_id}/frame/{idx}")
+@app.get("/projects/{project_id}/runs/{run_id}/frame/{idx}")
 def run_frame(
+    project_id: str,
     run_id: str,
     idx: int,
     source: str = Query("overlay", pattern="^(raw|overlay)$"),
 ) -> Response:
-    """Seek to frame `idx` in the source or overlay video, return JPEG bytes.
-
-    Doing the seek server-side is a deliberate choice — it avoids pre-extracting
-    every frame as a jpg on disk (which would balloon to hundreds of MB per
-    run). cv2.VideoCapture's seek is O(frame_idx) on some codecs, so this isn't
-    free; if Inspector scrubbing feels slow we'll add an LRU cache here.
-    """
-    rdir = runs_mod.run_dir(run_id)
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
 
@@ -293,49 +358,49 @@ def run_frame(
         cap.release()
 
 
-@app.get("/runs/{run_id}/overlay.mp4")
-def run_overlay(run_id: str) -> FileResponse:
-    p = runs_mod.run_dir(run_id) / runs_mod.OVERLAY_NAME
+@app.get("/projects/{project_id}/runs/{run_id}/overlay.mp4")
+def run_overlay(project_id: str, run_id: str) -> FileResponse:
+    _require_project(project_id)
+    p = runs_mod.run_dir(project_id, run_id) / runs_mod.OVERLAY_NAME
     if not p.exists():
         raise HTTPException(status_code=404, detail="overlay not yet written")
     return FileResponse(p, media_type="video/mp4")
 
 
-# ---- Rejections / Delete ---------------------------------------------------
-
-
-@app.get("/runs/{run_id}/rejections", response_model=RejectionsResponse)
-def get_rejections(run_id: str) -> RejectionsResponse:
-    rdir = runs_mod.run_dir(run_id)
+@app.get(
+    "/projects/{project_id}/runs/{run_id}/rejections",
+    response_model=RejectionsResponse,
+)
+def get_rejections(project_id: str, run_id: str) -> RejectionsResponse:
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     state = runs_mod.read_rejections(rdir)
     return RejectionsResponse(rejections={str(k): v for k, v in state.items()})
 
 
-@app.post("/runs/{run_id}/rejections/toggle", response_model=RejectionsResponse)
-def toggle_rejection(run_id: str, req: RejectToggleRequest) -> RejectionsResponse:
-    rdir = runs_mod.run_dir(run_id)
+@app.post(
+    "/projects/{project_id}/runs/{run_id}/rejections/toggle",
+    response_model=RejectionsResponse,
+)
+def toggle_rejection(
+    project_id: str, run_id: str, req: RejectToggleRequest
+) -> RejectionsResponse:
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     state = runs_mod.toggle_rejection(rdir, req.frame_idx, req.det_idx)
     return RejectionsResponse(rejections={str(k): v for k, v in state.items()})
 
 
-@app.post("/runs/{run_id}/approve", response_model=ApproveResponse)
-def approve_run_endpoint(run_id: str) -> ApproveResponse:
-    """Mark a completed Teacher run as "Approved as ground truth".
-
-    Idempotent: re-approving an already-approved run returns the existing
-    manifest unchanged (the timestamp does NOT shift on a second call —
-    that's a deliberate no-op so a double-click doesn't drift the date).
-
-    Errors:
-      404 — run does not exist.
-      400 — run's status is not "completed". A still-running or failed
-            run has nothing meaningful to approve.
-    """
-    rdir = runs_mod.run_dir(run_id)
+@app.post(
+    "/projects/{project_id}/runs/{run_id}/approve", response_model=ApproveResponse
+)
+def approve_run_endpoint(project_id: str, run_id: str) -> ApproveResponse:
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     manifest = runs_mod.read_manifest(rdir)
@@ -348,19 +413,15 @@ def approve_run_endpoint(run_id: str) -> ApproveResponse:
             ),
         )
     updated = runs_mod.approve_run(rdir)
-    return ApproveResponse(manifest=RunManifestModel(**updated.__dict__))
+    return ApproveResponse(manifest=_manifest_to_model(project_id, updated, rdir))
 
 
-@app.post("/runs/{run_id}/unapprove", response_model=ApproveResponse)
-def unapprove_run_endpoint(run_id: str) -> ApproveResponse:
-    """Clear the approval stamp.
-
-    Idempotent: unapproving an unreviewed/reviewed run is a no-op
-    returning the manifest unchanged. Status check still applies — the
-    spec disallows touching `approved_at` on non-completed runs in either
-    direction so the wire field never lies about state.
-    """
-    rdir = runs_mod.run_dir(run_id)
+@app.post(
+    "/projects/{project_id}/runs/{run_id}/unapprove", response_model=ApproveResponse
+)
+def unapprove_run_endpoint(project_id: str, run_id: str) -> ApproveResponse:
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     manifest = runs_mod.read_manifest(rdir)
@@ -373,51 +434,53 @@ def unapprove_run_endpoint(run_id: str) -> ApproveResponse:
             ),
         )
     updated = runs_mod.unapprove_run(rdir)
-    return ApproveResponse(manifest=RunManifestModel(**updated.__dict__))
+    return ApproveResponse(manifest=_manifest_to_model(project_id, updated, rdir))
 
 
-@app.delete("/runs/{run_id}")
-def delete_run(run_id: str) -> dict:
-    rdir = runs_mod.run_dir(run_id)
+@app.delete("/projects/{project_id}/runs/{run_id}")
+def delete_run(project_id: str, run_id: str) -> dict:
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
     if not rdir.exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
-    # Best-effort: if the run is still flagged "running" we could refuse, but
-    # background workers are daemon threads — the user explicitly asked us to
-    # delete, so we honor it. The worker will hit a write error and exit.
     runs_mod.delete_run(rdir)
     return {"deleted": run_id}
 
 
-# ---- Students / Optimize ---------------------------------------------------
+# ---- Per-project: Students ------------------------------------------------
 
 
-@app.post("/optimize", response_model=StudentDetail)
-def optimize_endpoint(req: OptimizeRequest) -> StudentDetail:
-    """Kick off a Student training run from one or more Teachers' COCO labels.
+def _student_manifest_to_model(
+    project_id: str, manifest: runs_mod.StudentManifest
+) -> StudentManifestModel:
+    return StudentManifestModel(project_id=project_id, **manifest.__dict__)
 
-    `train_teacher_ids` (required, ≥1): merged into the training set.
-    `eval_teacher_ids` (optional): held-out Teachers used to score
-    transferability — never seen at train time.
 
-    All train teachers must be `completed` and share the same `task`
-    (mixing detection + segmentation in one Student doesn't make sense).
-    Eval teachers must also be completed; a task mismatch is logged but
-    not refused — the trainer surfaces it as a poor mAP, which is more
-    informative than an opaque 400.
+def _student_detail(project_id: str, student_id: str) -> StudentDetail:
+    rdir = runs_mod.student_dir(project_id, student_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such student: {student_id}")
+    manifest = runs_mod.read_student_manifest(rdir)
+    stats = runs_mod.read_student_stats(rdir)
+    progress = runs_mod.read_progress(rdir)
+    return StudentDetail(
+        manifest=_student_manifest_to_model(project_id, manifest),
+        stats=StudentStatsModel(**stats.__dict__) if stats else None,
+        progress=RunProgressModel(**progress.__dict__) if progress else None,
+    )
 
-    Runs in a daemon thread; the client polls /students/{id} for progress.
-    """
+
+@app.post("/projects/{project_id}/optimize", response_model=StudentDetail)
+def optimize_endpoint(project_id: str, req: OptimizeRequest) -> StudentDetail:
+    project = _require_project(project_id)
     if not req.train_teacher_ids:
         raise HTTPException(
             status_code=400,
             detail="pick at least one Train teacher — a Student needs training data",
         )
 
-    # Validate every referenced teacher exists + is completed. Doing this
-    # synchronously (not in the worker) means the user sees the error
-    # immediately rather than as a "Student failed" row a few seconds later.
     def _load_teacher(tid: str) -> runs_mod.RunManifest:
-        tdir = runs_mod.run_dir(tid)
+        tdir = runs_mod.run_dir(project_id, tid)
         if not (tdir / runs_mod.MANIFEST_NAME).exists():
             raise HTTPException(status_code=404, detail=f"no such teacher: {tid}")
         m = runs_mod.read_manifest(tdir)
@@ -444,6 +507,16 @@ def optimize_endpoint(req: OptimizeRequest) -> StudentDetail:
             ),
         )
     task = train_manifests[0].task
+    if task != project.task:
+        # Defensive — teachers should always inherit project.task, but a stale
+        # manifest could drift. Surface as a 400.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"teacher task {task!r} disagrees with project task "
+                f"{project.task!r}"
+            ),
+        )
     bad_eval = [m.id for m in eval_manifests if m.task != task]
     if bad_eval:
         log.warning(
@@ -452,6 +525,7 @@ def optimize_endpoint(req: OptimizeRequest) -> StudentDetail:
 
     try:
         manifest = run_optimize_in_background(
+            project_id=project_id,
             train_teacher_ids=req.train_teacher_ids,
             eval_teacher_ids=req.eval_teacher_ids,
             task=task,
@@ -466,65 +540,45 @@ def optimize_endpoint(req: OptimizeRequest) -> StudentDetail:
         )
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return _student_detail(manifest.id)
+    return _student_detail(project_id, manifest.id)
 
 
-@app.get("/students/architectures", response_model=ArchitecturesResponse)
-def students_architectures() -> ArchitecturesResponse:
-    """List every registered Student-trainer architecture (Phase 1.4).
-
-    Reads `pipeline.students.list_trainers()` live so newly-wired
-    architectures show up in the GUI without any server-side schema
-    change. The GUI fetches this once on mount and caches it in the
-    Zustand store.
-    """
+@app.get(
+    "/projects/{project_id}/students/architectures",
+    response_model=ArchitecturesResponse,
+)
+def students_architectures(project_id: str) -> ArchitecturesResponse:
+    _require_project(project_id)
     return ArchitecturesResponse(architectures=list_trainers())
 
 
-@app.get("/students", response_model=StudentsResponse)
-def students_list() -> StudentsResponse:
+@app.get("/projects/{project_id}/students", response_model=StudentsResponse)
+def students_list(project_id: str) -> StudentsResponse:
+    _require_project(project_id)
     return StudentsResponse(
-        students=[StudentManifestModel(**m.__dict__) for m in runs_mod.list_students()]
+        students=[
+            _student_manifest_to_model(project_id, m)
+            for m in runs_mod.list_students(project_id)
+        ]
     )
 
 
-@app.get("/students/{student_id}", response_model=StudentDetail)
-def student_detail(student_id: str) -> StudentDetail:
-    return _student_detail(student_id)
+@app.get(
+    "/projects/{project_id}/students/{student_id}", response_model=StudentDetail
+)
+def student_detail(project_id: str, student_id: str) -> StudentDetail:
+    _require_project(project_id)
+    return _student_detail(project_id, student_id)
 
 
-def _student_detail(student_id: str) -> StudentDetail:
-    rdir = runs_mod.run_dir(student_id)
-    if not (rdir / runs_mod.MANIFEST_NAME).exists():
-        raise HTTPException(status_code=404, detail=f"no such student: {student_id}")
-    manifest = runs_mod.read_student_manifest(rdir)
-    stats = runs_mod.read_student_stats(rdir)
-    progress = runs_mod.read_progress(rdir)
-    return StudentDetail(
-        manifest=StudentManifestModel(**manifest.__dict__),
-        stats=StudentStatsModel(**stats.__dict__) if stats else None,
-        progress=RunProgressModel(**progress.__dict__) if progress else None,
-    )
-
-
-@app.post("/students/preview-buckets", response_model=PreviewBucketsResponse)
-def preview_buckets(req: PreviewBucketsRequest) -> PreviewBucketsResponse:
-    """Live frame-bucket preview for the New Student form (Phase 0.4).
-
-    Cheap to call — reads each teacher's `coco.json` once, runs the same
-    `classify_frames` pass `prepare_yolo_dataset` would run, and returns
-    the bucket counts. No frame extraction, no I/O beyond the COCO read.
-
-    Used by the GUI to show "you're about to train on N positive frames,
-    drop M uncertain ones" while the user is still tweaking thresholds.
-    The 250ms client-side debounce + this O(annotations) server pass is
-    fast enough to feel live on every checkbox toggle and slider drag.
-
-    Errors:
-      • t_low > t_high  → 422 via Pydantic validator on PreviewBucketsRequest.
-      • teacher_id missing on disk     → 404 with the offending id.
-      • teacher has no coco.json yet   → 400 (Learn run never finished).
-    """
+@app.post(
+    "/projects/{project_id}/students/preview-buckets",
+    response_model=PreviewBucketsResponse,
+)
+def preview_buckets(
+    project_id: str, req: PreviewBucketsRequest
+) -> PreviewBucketsResponse:
+    _require_project(project_id)
     per_teacher: list[PreviewBucketsPerTeacher] = []
     agg_pos = 0
     agg_unc = 0
@@ -533,7 +587,7 @@ def preview_buckets(req: PreviewBucketsRequest) -> PreviewBucketsResponse:
     seen_classes: set[str] = set()
 
     for tid in req.teacher_ids:
-        tdir = runs_mod.run_dir(tid)
+        tdir = runs_mod.run_dir(project_id, tid)
         if not (tdir / runs_mod.MANIFEST_NAME).exists():
             raise HTTPException(status_code=404, detail=f"no such teacher: {tid}")
         coco_path = tdir / runs_mod.LABELS_DIR / runs_mod.COCO_NAME
@@ -552,10 +606,6 @@ def preview_buckets(req: PreviewBucketsRequest) -> PreviewBucketsResponse:
                 detail=f"teacher {tid!r} coco.json is malformed: {e}",
             )
 
-        # Same bucket logic the trainer uses, so the preview is honest.
-        # We've already validated t_low <= t_high in the Pydantic model;
-        # classify_frames raises ValueError on inversion which would be
-        # an internal bug at this point.
         buckets = distill.classify_frames(
             coco, t_high=req.t_high, t_low=req.t_low,
         )
@@ -563,10 +613,6 @@ def preview_buckets(req: PreviewBucketsRequest) -> PreviewBucketsResponse:
         uncertain = len(buckets.uncertain)
         true_negative = len(buckets.true_negative)
 
-        # Escape hatch: reclassify uncertain frames as true_negative *before*
-        # reporting counts, to mirror what `prepare_yolo_dataset` would do
-        # at training time. The user-visible "uncertain" then drops to 0
-        # and the negative count grows — exactly what the trainer would see.
         if req.treat_empty_as_negative:
             true_negative += uncertain
             uncertain = 0
@@ -601,9 +647,10 @@ def preview_buckets(req: PreviewBucketsRequest) -> PreviewBucketsResponse:
     )
 
 
-@app.delete("/students/{student_id}")
-def delete_student(student_id: str) -> dict:
-    rdir = runs_mod.run_dir(student_id)
+@app.delete("/projects/{project_id}/students/{student_id}")
+def delete_student(project_id: str, student_id: str) -> dict:
+    _require_project(project_id)
+    rdir = runs_mod.student_dir(project_id, student_id)
     if not rdir.exists():
         raise HTTPException(status_code=404, detail=f"no such student: {student_id}")
     runs_mod.delete_run(rdir)

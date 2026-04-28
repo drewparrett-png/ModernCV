@@ -285,6 +285,7 @@ function NewStudentForm({
   // code path.
   const [architecture, setArchitecture] = useState<string>(DEFAULT_ARCHITECTURE);
   const architectures = useStore((s) => s.architectures);
+  const projectId = useStore((s) => s.currentProjectId);
 
   // Confidence-band knobs (Phase 0.4). Local string state for the inputs
   // so the user can type a partial value (e.g. "0.") without React
@@ -348,7 +349,7 @@ function NewStudentForm({
   // fresher result, which matters once teacher COCOs get large.
   useEffect(() => {
     const trainIds = [...trainSet];
-    if (trainIds.length === 0) {
+    if (trainIds.length === 0 || !projectId) {
       setPreview(null);
       setPreviewError(null);
       return;
@@ -361,7 +362,7 @@ function NewStudentForm({
     }
     const seq = ++previewSeqRef.current;
     const handle = setTimeout(() => {
-      previewBuckets({
+      previewBuckets(projectId, {
         teacher_ids: trainIds,
         t_high: tHigh,
         t_low: tLow,
@@ -381,7 +382,7 @@ function NewStudentForm({
         });
     }, PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(handle);
-  }, [trainSet, tHigh, tLow, treatEmptyAsNegative, thresholdsValid]);
+  }, [projectId, trainSet, tHigh, tLow, treatEmptyAsNegative, thresholdsValid]);
 
   if (teachers.length === 0) {
     return (

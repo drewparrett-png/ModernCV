@@ -99,7 +99,7 @@ def _patch_io(monkeypatch: pytest.MonkeyPatch, coco: dict) -> None:
         pixels — only the label text matters for this comparison.
     """
 
-    def fake_read_teacher_coco(tid: str) -> tuple[dict, str]:
+    def fake_read_teacher_coco(project_id: str, tid: str) -> tuple[dict, str]:
         return coco, f"/fake/{tid}.mp4"
 
     def fake_extract_frames(*, video_path, frame_indices, out_paths, progress=None):
@@ -125,6 +125,7 @@ def test_treat_empty_as_negative_reproduces_old_image_and_annotation_counts(
     _patch_io(monkeypatch, coco)
 
     summary = distill.prepare_yolo_dataset(
+        project_id="proj_test",
         student_dir=tmp_path,
         train_teacher_ids=["teacher_a"],
         treat_empty_as_negative=True,
@@ -177,6 +178,7 @@ def test_strict_mode_drops_uncertain_frames(
     n_total_frames = len(coco["images"])  # 7 = 5 pos + 1 neg + 1 uncertain
 
     strict = distill.prepare_yolo_dataset(
+        project_id="proj_test",
         student_dir=tmp_path / "strict",
         train_teacher_ids=["teacher_a"],
         treat_empty_as_negative=False,
@@ -187,6 +189,7 @@ def test_strict_mode_drops_uncertain_frames(
     assert strict.n_train_images + strict.n_val_images == n_total_frames - 1
 
     escape = distill.prepare_yolo_dataset(
+        project_id="proj_test",
         student_dir=tmp_path / "escape",
         train_teacher_ids=["teacher_a"],
         treat_empty_as_negative=True,
@@ -201,6 +204,7 @@ def test_t_low_above_t_high_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyP
     _patch_io(monkeypatch, coco)
     with pytest.raises(ValueError, match="t_low.*t_high"):
         distill.prepare_yolo_dataset(
+            project_id="proj_test",
             student_dir=tmp_path,
             train_teacher_ids=["teacher_a"],
             t_high=0.10,
