@@ -7,7 +7,7 @@
  *
  *   3.1  side-by-side details table, sortable, best-per-column highlight
  *   3.2  per-eval-teacher mAP matrix, with optional shared-only filter
- *   3.3  Pareto plot (next commit)
+ *   3.3  Pareto plot (mAP vs. p50 latency) on Recharts
  *   3.4  comparability badges (next commit)
  *
  * Selection lives in the Zustand store (`compareStudentIds`) so toggling
@@ -15,6 +15,17 @@
  */
 
 import { useMemo, useState } from "react";
+import {
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+  ZAxis,
+} from "recharts";
 
 import { useStore } from "../store";
 import type { RunDetail, StudentDetail, StudentStats } from "../types";
@@ -22,9 +33,33 @@ import {
   bestPerColumn,
   evalTeacherMatrix,
   mapColourClass,
+  paretoPoints,
   sharedEvalTeachers,
   type CompareColumn,
+  type ParetoPoint,
 } from "../lib/compare";
+
+// ---- Architecture palette (Pareto plot) ---------------------------------
+
+// 6 distinguishable hues; categorical, not perceptually ordered. Picked to
+// stay readable on the white canvas the rest of the GUI uses. Lookup is
+// arch-name-stable: same architecture always gets the same colour
+// regardless of which students are selected, which makes the Pareto plot
+// easier to read across re-selections.
+const ARCH_PALETTE = [
+  "#2563eb", // blue
+  "#dc2626", // red
+  "#059669", // emerald
+  "#d97706", // amber
+  "#7c3aed", // violet
+  "#0891b2", // cyan
+];
+
+function archColour(arch: string, allArchs: string[]): string {
+  const idx = allArchs.indexOf(arch);
+  if (idx < 0) return ARCH_PALETTE[0];
+  return ARCH_PALETTE[idx % ARCH_PALETTE.length];
+}
 
 // ---- Column definitions for the details table --------------------------
 
@@ -242,7 +277,7 @@ function CompareSelector({
   );
 }
 
-// ---- Body (3.1 details table + 3.2 matrix; more sections appended later)
+// ---- Body (table + matrix + Pareto; badges appended in next commit)
 
 function CompareBody({
   selected,
@@ -271,6 +306,7 @@ function CompareBody({
         teacherDetails={teacherDetails}
         onInspectTeacher={onInspectTeacher}
       />
+      <ParetoPlot selected={selected} />
     </div>
   );
 }
@@ -490,5 +526,136 @@ function EvalTeacherMatrixView({
         )}
       </div>
     </section>
+  );
+}
+
+// ---- 3.3 Pareto plot ---------------------------------------------------
+
+function ParetoPlot({ selected }: { selected: StudentDetail[] }) {
+  const points = useMemo(
+    () => paretoPoints(selected.map((d) => ({ detail: d }))),
+    [selected],
+  );
+
+  // Group points by architecture so each gets its own <Scatter> layer with
+  // a distinct colour and a legend entry.
+  const grouped = useMemo(() => {
+    const m = new Map<string, ParetoPoint[]>();
+    for (const p of points) {
+      const arr = m.get(p.architecture) ?? [];
+      arr.push(p);
+      m.set(p.architecture, arr);
+    }
+    return m;
+  }, [points]);
+
+  const allArchs = useMemo(() => [...grouped.keys()].sort(), [grouped]);
+
+  if (points.length === 0) return null;
+
+  return (
+    <section className="compare-section">
+      <h3>Pareto: mAP@0.5 vs. p50 latency</h3>
+      <div className="compare-pareto-blurb">
+        Top-left is the desirable region: high mAP, low latency. Dot size
+        scales with model size (cosmetic).
+      </div>
+      <div className="compare-pareto-wrap">
+        <ResponsiveContainer width="100%" height={360}>
+          <ScatterChart margin={{ top: 16, right: 24, bottom: 48, left: 56 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+            <XAxis
+              type="number"
+              dataKey="p50_inference_ms"
+              name="p50 latency (ms)"
+              label={{
+                value: "p50 latency (ms) — lower is better",
+                position: "insideBottom",
+                offset: -28,
+                fill: "#374151",
+              }}
+              stroke="#6b7280"
+            />
+            <YAxis
+              type="number"
+              dataKey="map50"
+              name="mAP@0.5"
+              domain={[0, 1]}
+              label={{
+                value: "mAP@0.5 — higher is better",
+                angle: -90,
+                position: "insideLeft",
+                offset: -4,
+                fill: "#374151",
+              }}
+              stroke="#6b7280"
+            />
+            <ZAxis
+              type="number"
+              dataKey="model_size_mb"
+              range={[60, 240]}
+              name="model size (MB)"
+            />
+            <Tooltip
+              cursor={{ strokeDasharray: "3 3" }}
+              content={<ParetoTooltip />}
+            />
+            <Legend />
+            {allArchs.map((arch) => (
+              <Scatter
+                key={arch}
+                name={arch}
+                data={grouped.get(arch) ?? []}
+                fill={archColour(arch, allArchs)}
+              />
+            ))}
+          </ScatterChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
+  );
+}
+
+interface RechartsTooltipProps {
+  active?: boolean;
+  payload?: { payload: ParetoPoint }[];
+}
+
+function ParetoTooltip({ active, payload }: RechartsTooltipProps) {
+  if (!active || !payload || payload.length === 0) return null;
+  const p = payload[0].payload;
+  return (
+    <div className="compare-pareto-tooltip">
+      <div className="compare-pareto-tooltip-header">{p.prompt}</div>
+      <div className="compare-pareto-tooltip-arch mono">{p.architecture}</div>
+      <table>
+        <tbody>
+          <tr>
+            <td>mAP@0.5</td>
+            <td className="mono">{p.map50.toFixed(3)}</td>
+          </tr>
+          <tr>
+            <td>mAP@0.5:0.95</td>
+            <td className="mono">{p.map50_95.toFixed(3)}</td>
+          </tr>
+          <tr>
+            <td>Latency p50/p95</td>
+            <td className="mono">
+              {p.p50_inference_ms.toFixed(1)} / {p.p95_inference_ms.toFixed(1)} ms
+            </td>
+          </tr>
+          <tr>
+            <td>Size</td>
+            <td className="mono">{p.model_size_mb.toFixed(1)} MB</td>
+          </tr>
+          <tr>
+            <td>Train</td>
+            <td className="mono">
+              {p.train_images} imgs · {formatSeconds(p.train_seconds)}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   );
 }

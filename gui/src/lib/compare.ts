@@ -9,7 +9,7 @@
  * testing happens through the Compare tab in the GUI.
  */
 
-import type { StudentStats } from "../types";
+import type { StudentDetail, StudentStats } from "../types";
 
 // ---- 3.1 best-per-column highlight ---------------------------------------
 
@@ -156,4 +156,48 @@ export function mapColourClass(m: number | null): string {
   if (m >= 0.7) return "map-good";
   if (m >= 0.4) return "map-okay";
   return "map-poor";
+}
+
+// ---- 3.3 Pareto plot data shape -----------------------------------------
+
+export interface ParetoPoint {
+  studentId: string;
+  prompt: string;
+  architecture: string;
+  /** X axis: lower-is-better. */
+  p50_inference_ms: number;
+  /** Y axis: higher-is-better. */
+  map50: number;
+  map50_95: number;
+  p95_inference_ms: number;
+  model_size_mb: number;
+  train_images: number;
+  train_seconds: number;
+}
+
+/** Translate completed-Student details into Recharts-friendly points.
+ *  Skips Students without stats (`epochs == 0` is the trainer's
+ *  signal that nothing useful happened — drop them from the plot
+ *  rather than show a 0-mAP / 0-latency dot at the origin). */
+export function paretoPoints(
+  students: { detail: StudentDetail }[],
+): ParetoPoint[] {
+  const out: ParetoPoint[] = [];
+  for (const { detail } of students) {
+    const stats = detail.stats;
+    if (!stats || stats.epochs === 0) continue;
+    out.push({
+      studentId: detail.manifest.id,
+      prompt: detail.manifest.prompt,
+      architecture: detail.manifest.architecture ?? "yolov8n",
+      p50_inference_ms: stats.p50_inference_ms,
+      map50: stats.map50,
+      map50_95: stats.map50_95,
+      p95_inference_ms: stats.p95_inference_ms,
+      model_size_mb: stats.model_size_mb,
+      train_images: stats.train_images,
+      train_seconds: stats.train_seconds,
+    });
+  }
+  return out;
 }
