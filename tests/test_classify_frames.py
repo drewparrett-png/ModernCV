@@ -20,7 +20,7 @@ def _coco(images: list[dict], annotations: list[dict]) -> dict:
 
 
 def test_empty_coco_returns_empty_buckets() -> None:
-    out = classify_frames(_coco([], []), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco([], []), export_threshold=0.35, t_low=0.15)
     assert out == FrameBuckets(positive=[], uncertain=[], true_negative=[])
 
 
@@ -30,7 +30,7 @@ def test_frame_with_no_annotations_is_true_negative() -> None:
             images=[{"id": 0, "width": 100, "height": 100}],
             annotations=[],
         ),
-        t_high=0.35,
+        export_threshold=0.35,
         t_low=0.15,
     )
     assert out.true_negative == [0]
@@ -50,20 +50,20 @@ def test_bucketing_by_max_score_only() -> None:
         {"image_id": 1, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.20},
         {"image_id": 2, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.05},
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.35, t_low=0.15)
     assert out.positive == [0]
     assert out.uncertain == [1]
     assert sorted(out.true_negative) == [2, 3]
 
 
-def test_score_exactly_at_t_high_is_positive() -> None:
-    # `>= t_high` is the positive boundary — exactly t_high goes positive,
-    # not uncertain.
+def test_score_exactly_at_export_threshold_is_positive() -> None:
+    # `>= export_threshold` is the positive boundary — exactly export_threshold
+    # goes positive, not uncertain.
     images = [{"id": 0, "width": 100, "height": 100}]
     annotations = [
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.35},
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.35, t_low=0.15)
     assert out.positive == [0]
     assert out.uncertain == []
     assert out.true_negative == []
@@ -77,7 +77,7 @@ def test_score_exactly_at_t_low_is_uncertain() -> None:
     annotations = [
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.15},
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.35, t_low=0.15)
     assert out.uncertain == [0]
     assert out.positive == []
     assert out.true_negative == []
@@ -88,7 +88,7 @@ def test_score_just_below_t_low_is_true_negative() -> None:
     annotations = [
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.149},
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.35, t_low=0.15)
     assert out.true_negative == [0]
 
 
@@ -101,19 +101,19 @@ def test_missing_score_treated_as_one() -> None:
     annotations = [
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10]},  # no score key
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.35, t_low=0.15)
     assert out.positive == [0]
 
 
-def test_t_low_above_t_high_is_rejected() -> None:
-    with pytest.raises(ValueError, match="t_low.*t_high"):
-        classify_frames(_coco([], []), t_high=0.15, t_low=0.35)
+def test_t_low_above_export_threshold_is_rejected() -> None:
+    with pytest.raises(ValueError, match="t_low.*export_threshold"):
+        classify_frames(_coco([], []), export_threshold=0.15, t_low=0.35)
 
 
-def test_t_low_equal_t_high_is_allowed() -> None:
-    # Edge case: t_low == t_high collapses the uncertain band — every
-    # frame is either positive or true_negative. We allow this rather
-    # than raising; it's a sensible "no uncertainty band" mode.
+def test_t_low_equal_export_threshold_is_allowed() -> None:
+    # Edge case: t_low == export_threshold collapses the uncertain band —
+    # every frame is either positive or true_negative. We allow this
+    # rather than raising; it's a sensible "no uncertainty band" mode.
     images = [
         {"id": 0, "width": 100, "height": 100},
         {"id": 1, "width": 100, "height": 100},
@@ -122,7 +122,7 @@ def test_t_low_equal_t_high_is_allowed() -> None:
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.30},
         {"image_id": 1, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.20},
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.30, t_low=0.30)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.30, t_low=0.30)
     assert out.positive == [0]
     assert out.uncertain == []
     assert out.true_negative == [1]
@@ -131,13 +131,13 @@ def test_t_low_equal_t_high_is_allowed() -> None:
 def test_positive_dominates_when_mixed() -> None:
     # A single high-score box on a frame is enough to make it positive,
     # even if every other ann is in the uncertain band. The trainer
-    # will apply min_score=t_high to drop the low-score boxes from the
-    # YOLO label.
+    # will apply min_score=export_threshold to drop the low-score boxes
+    # from the YOLO label.
     images = [{"id": 0, "width": 100, "height": 100}]
     annotations = [
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.8},
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.20},
         {"image_id": 0, "category_id": 0, "bbox": [0, 0, 10, 10], "score": 0.18},
     ]
-    out = classify_frames(_coco(images, annotations), t_high=0.35, t_low=0.15)
+    out = classify_frames(_coco(images, annotations), export_threshold=0.35, t_low=0.15)
     assert out.positive == [0]

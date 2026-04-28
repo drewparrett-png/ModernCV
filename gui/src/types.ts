@@ -95,7 +95,9 @@ export interface ProjectCreateRequest {
 export type Mode = "learn" | "optimize";
 
 /** Project-scoped Learn request (Phase 1). `task` and `prompts` come from
- *  the parent project, NOT from this body. */
+ *  the parent project, NOT from this body. Phase 2 dropped the per-run
+ *  detector threshold knobs — every detection ≥ SCORE_FLOOR is persisted
+ *  and filtered post-hoc by `RunManifest.display_threshold`. */
 export interface LearnRequest {
   video_path: string;
   detect_impl?: string;
@@ -103,11 +105,6 @@ export interface LearnRequest {
   reid_impl?: string;
   track_impl?: string;
   max_frames?: number;
-  /** Detector confidence floor for box scores. Phase 2 will drop these in
-   *  favor of a fixed low floor + post-hoc filtering. */
-  box_threshold?: number;
-  text_threshold?: number;
-  full_resolution?: boolean;
 }
 
 export type ReviewStatus = "unreviewed" | "reviewed" | "approved";
@@ -125,6 +122,9 @@ export interface RunManifest {
   error: string | null;
   approved_at: string | null;
   review_status: ReviewStatus;
+  /** Phase 2: post-hoc score filter the inspector applies by default.
+   *  PATCH `/projects/{pid}/runs/{rid}` to persist a new value. */
+  display_threshold: number;
 }
 
 export interface PerClassStats {
@@ -199,7 +199,7 @@ export interface StudentManifest {
   status: "queued" | "running" | "completed" | "failed";
   models: Record<string, string>;
   error: string | null;
-  t_high?: number;
+  export_threshold?: number;
   t_low?: number;
   treat_empty_as_negative?: boolean;
   architecture?: string;
@@ -237,7 +237,7 @@ export interface StudentStats {
   n_uncertain_dropped: number;
   n_true_negative_frames: number;
   per_teacher_buckets: PerTrainTeacherBucket[];
-  t_high: number;
+  export_threshold: number;
   t_low: number;
   treat_empty_as_negative: boolean;
   imgsz: number;
@@ -262,7 +262,7 @@ export interface OptimizeRequest {
   segment_impl?: string;
   track_impl?: string;
   epochs?: number;
-  t_high?: number;
+  export_threshold?: number;
   t_low?: number;
   treat_empty_as_negative?: boolean;
   architecture?: string;
@@ -274,7 +274,7 @@ export interface ArchitecturesResponse {
 
 export interface PreviewBucketsRequest {
   teacher_ids: string[];
-  t_high?: number;
+  export_threshold?: number;
   t_low?: number;
   treat_empty_as_negative?: boolean;
 }

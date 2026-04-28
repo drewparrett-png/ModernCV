@@ -40,7 +40,7 @@ from pipeline import distill
 def _make_synthetic_coco() -> dict:
     """Small two-class COCO sized to clear MIN_TRAIN_ANNOTATIONS=5.
 
-    Frames 0-4: each has two anns, both at score ≥ t_high=0.35
+    Frames 0-4: each has two anns, both at score ≥ export_threshold=0.30
                 (cat 0 at 0.9, cat 1 at 0.5)              — positive.
     Frame 5:    no anns                                   — true negative.
 
@@ -129,9 +129,9 @@ def test_treat_empty_as_negative_reproduces_old_image_and_annotation_counts(
         student_dir=tmp_path,
         train_teacher_ids=["teacher_a"],
         treat_empty_as_negative=True,
-        # Defaults: t_high=0.35, t_low=0.15. Synthesized COCO has no
-        # anns in the uncertain band, so even strict mode would produce
-        # the same numbers.
+        # Defaults: export_threshold=0.30, t_low=0.15. Synthesized COCO
+        # has no anns in the uncertain band, so even strict mode would
+        # produce the same numbers.
     )
 
     # Old behaviour, computed from the synthetic input directly:
@@ -199,15 +199,15 @@ def test_strict_mode_drops_uncertain_frames(
     assert escape.n_train_images + escape.n_val_images == n_total_frames
 
 
-def test_t_low_above_t_high_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_t_low_above_export_threshold_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     coco = _make_synthetic_coco()
     _patch_io(monkeypatch, coco)
-    with pytest.raises(ValueError, match="t_low.*t_high"):
+    with pytest.raises(ValueError, match="t_low.*export_threshold"):
         distill.prepare_yolo_dataset(
             project_id="proj_test",
             student_dir=tmp_path,
             train_teacher_ids=["teacher_a"],
-            t_high=0.10,
+            export_threshold=0.10,
             t_low=0.50,
         )
 

@@ -15,43 +15,43 @@ from pydantic import ValidationError
 from server.schemas import OptimizeRequest
 
 
-def test_defaults_are_the_spec_values() -> None:
-    """The defaults are documented in `docs/student-training.md`. If we
-    ever bump them, this test forces an explicit decision rather than a
-    silent drift in serialised payloads."""
+def test_defaults_track_display_threshold() -> None:
+    """Phase 2: the schema default for `export_threshold` must equal the
+    detector's `display_threshold` default so a Student trained right
+    after a Teacher reproduces what the inspector shows."""
     req = OptimizeRequest(train_teacher_ids=["t1"])
-    assert req.t_high == 0.35
+    assert req.export_threshold == 0.30
     assert req.t_low == 0.15
     assert req.treat_empty_as_negative is False
 
 
-def test_t_low_equal_t_high_is_allowed() -> None:
+def test_t_low_equal_export_threshold_is_allowed() -> None:
     """The boundary case — equal thresholds collapse the uncertain band
     to nothing, which is a valid (if unusual) configuration. Accept it
     rather than forcing a strict-less-than."""
     req = OptimizeRequest(
-        train_teacher_ids=["t1"], t_high=0.4, t_low=0.4,
+        train_teacher_ids=["t1"], export_threshold=0.4, t_low=0.4,
     )
-    assert req.t_high == 0.4
+    assert req.export_threshold == 0.4
     assert req.t_low == 0.4
 
 
-def test_t_low_above_t_high_rejected() -> None:
+def test_t_low_above_export_threshold_rejected() -> None:
     """Inverted thresholds → ValidationError. The error message must
     name both fields so the GUI can highlight them."""
     with pytest.raises(ValidationError) as exc:
         OptimizeRequest(
-            train_teacher_ids=["t1"], t_high=0.10, t_low=0.50,
+            train_teacher_ids=["t1"], export_threshold=0.10, t_low=0.50,
         )
     msg = str(exc.value)
-    assert "t_low" in msg and "t_high" in msg
+    assert "t_low" in msg and "export_threshold" in msg
 
 
-def test_t_low_just_above_t_high_rejected() -> None:
+def test_t_low_just_above_export_threshold_rejected() -> None:
     """Fence-post — even a tiny margin should fail."""
     with pytest.raises(ValidationError):
         OptimizeRequest(
-            train_teacher_ids=["t1"], t_high=0.35, t_low=0.36,
+            train_teacher_ids=["t1"], export_threshold=0.35, t_low=0.36,
         )
 
 

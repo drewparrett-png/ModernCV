@@ -180,7 +180,7 @@ def test_custom_thresholds_change_buckets(client: TestClient, project: str) -> N
 
     res = client.post(
         f"/projects/{project}/students/preview-buckets",
-        json={"teacher_ids": ["teacher_a"], "t_high": 0.10, "t_low": 0.05},
+        json={"teacher_ids": ["teacher_a"], "export_threshold": 0.10, "t_low": 0.05},
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -189,14 +189,14 @@ def test_custom_thresholds_change_buckets(client: TestClient, project: str) -> N
     assert body["aggregate"]["true_negative"] == 0
 
 
-def test_t_low_above_t_high_rejected(client: TestClient, project: str) -> None:
+def test_t_low_above_export_threshold_rejected(client: TestClient, project: str) -> None:
     res = client.post(
         f"/projects/{project}/students/preview-buckets",
-        json={"teacher_ids": [], "t_high": 0.10, "t_low": 0.50},
+        json={"teacher_ids": [], "export_threshold": 0.10, "t_low": 0.50},
     )
     assert res.status_code == 422
     detail = json.dumps(res.json())
-    assert "t_low" in detail and "t_high" in detail
+    assert "t_low" in detail and "export_threshold" in detail
 
 
 def test_missing_teacher_returns_404(client: TestClient, project: str) -> None:

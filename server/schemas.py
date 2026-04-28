@@ -139,16 +139,9 @@ class LearnRequest(BaseModel):
     reid_impl: Optional[str] = None
     track_impl: Optional[str] = None
     max_frames: Optional[int] = None  # cap for fast iteration
-    # Detector confidence knobs. Both default to None ⇒ backend uses the
-    # adapter's built-in defaults (0.30 / 0.25 for GroundingDINO). Phase 2
-    # will drop these in favor of a fixed low floor + post-hoc filtering.
-    box_threshold: Optional[float] = None
-    text_threshold: Optional[float] = None
-    # When True, the GroundingDINO adapter passes frames to the model with
-    # NO resize — the source resolution is preserved. Default False keeps the
-    # HF processor defaults (shortest 800 / longest 1333), which is faster
-    # but blurs small objects (a 10-px ball at 1080p halves to 5 px).
-    full_resolution: Optional[bool] = None
+    # Phase 2: detector confidence is no longer a run-time knob. The
+    # detector runs at a fixed low floor and the GUI filters post-hoc via
+    # the manifest's `display_threshold`.
 
 
 class RunManifestModel(BaseModel):
@@ -172,6 +165,20 @@ class RunManifestModel(BaseModel):
     error: Optional[str] = None
     approved_at: Optional[str] = None
     review_status: Literal["unreviewed", "reviewed", "approved"] = "unreviewed"
+    # Phase 2: post-hoc score filter the GUI applies by default. The
+    # detector persists every detection at SCORE_FLOOR=0.05; the inspector
+    # slider PATCHes this field to change the canonical view without
+    # rerunning the detector.
+    display_threshold: float = 0.30
+
+
+class RunPatchRequest(BaseModel):
+    """Body of `PATCH /projects/{pid}/runs/{rid}`. Phase 2 surfaces a
+    single mutable field — the post-hoc display threshold."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_threshold: float = Field(ge=0.0, le=1.0)
 
 
 class PerClassStatsModel(BaseModel):
@@ -262,11 +269,14 @@ class OptimizeRequest(BaseModel):
     them at train time. May overlap with the train set (in-distribution
     sanity check); the GUI warns when it does.
 
-    Confidence-band fields (`t_high`, `t_low`, `treat_empty_as_negative`)
-    drive the frame-bucket filter in `pipeline.distill.prepare_yolo_dataset`.
-    See `docs/student-training.md` Phase 0 for the full motivation; the
-    short version is "drop frames the teacher was unsure about so we don't
-    train the Student to suppress detections it should be making".
+    Confidence-band fields (`export_threshold`, `t_low`,
+    `treat_empty_as_negative`) drive the frame-bucket filter in
+    `pipeline.distill.prepare_yolo_dataset`. See `docs/student-training.md`
+    Phase 0 for the full motivation; the short version is "drop frames the
+    teacher was unsure about so we don't train the Student to suppress
+    detections it should be making". Phase 2 renamed `t_high` to
+    `export_threshold` to make the role explicit — it's the cutoff at
+    which a Teacher detection becomes a Student training label.
     """
 
     train_teacher_ids: list[str] = Field(default_factory=list)
@@ -275,8 +285,12 @@ class OptimizeRequest(BaseModel):
     segment_impl: Optional[str] = None
     track_impl: Optional[str] = None
     epochs: int = 50
-    # Confidence bands. Defaults match the spec (`docs/student-training.md`).
-    t_high: float = 0.35
+    # Confidence bands. `export_threshold` is the cutoff at which a teacher
+    # detection becomes a student training label (and a frame becomes
+    # "positive"); `t_low` floors the uncertain band. Default mirrors
+    # `RunManifest.display_threshold` so a Student trained immediately
+    # after a Teacher reflects what the user is looking at in the inspector.
+    export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
     # Trainer architecture (Phase 1.3). Default `yolov8n` reproduces the
@@ -287,11 +301,12 @@ class OptimizeRequest(BaseModel):
     architecture: str = "yolov8n"
 
     @model_validator(mode="after")
-    def _t_low_le_t_high(self) -> "OptimizeRequest":
-        if self.t_low > self.t_high:
+    def _t_low_le_export_threshold(self) -> "OptimizeRequest":
+        if self.t_low > self.export_threshold:
             raise ValueError(
-                f"t_low ({self.t_low}) must be <= t_high ({self.t_high}) — "
-                "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+                f"t_low ({self.t_low}) must be <= export_threshold "
+                f"({self.export_threshold}) — the uncertain band "
+                "[t_low, export_threshold) would otherwise be empty/inverted."
             )
         return self
 
@@ -331,8 +346,9 @@ class StudentManifestModel(BaseModel):
     error: Optional[str] = None
     # Confidence-band thresholds for the bucketing pass — persisted on the
     # manifest so a Student is reproducible from manifest.json alone.
-    # Defaulted so old manifest.json files without these keys still load.
-    t_high: float = 0.35
+    # Phase 2 renamed `t_high` → `export_threshold`; default tracks
+    # `RunManifest.display_threshold`.
+    export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
     # Trainer architecture (Phase 1.3). Defaulted to `yolov8n` so old
@@ -387,8 +403,8 @@ class StudentStatsModel(BaseModel):
     n_true_negative_frames: int = 0
     per_teacher_buckets: list[PerTrainTeacherBucket] = Field(default_factory=list)
     # Stamp the thresholds used by the trainer so the detail card shows
-    # "buckets at t_high=0.35" without re-reading the manifest.
-    t_high: float = 0.35
+    # "buckets at export_threshold=0.30" without re-reading the manifest.
+    export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
     # ---- Phase 2.2 comparability fields (mirror of StudentStats) --------
@@ -433,16 +449,17 @@ class PreviewBucketsRequest(BaseModel):
     """
 
     teacher_ids: list[str] = Field(default_factory=list)
-    t_high: float = 0.35
+    export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
 
     @model_validator(mode="after")
-    def _t_low_le_t_high(self) -> "PreviewBucketsRequest":
-        if self.t_low > self.t_high:
+    def _t_low_le_export_threshold(self) -> "PreviewBucketsRequest":
+        if self.t_low > self.export_threshold:
             raise ValueError(
-                f"t_low ({self.t_low}) must be <= t_high ({self.t_high}) — "
-                "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+                f"t_low ({self.t_low}) must be <= export_threshold "
+                f"({self.export_threshold}) — the uncertain band "
+                "[t_low, export_threshold) would otherwise be empty/inverted."
             )
         return self
 

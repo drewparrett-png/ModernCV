@@ -259,6 +259,11 @@ class RunManifest:
     # is then derived from rejection presence). Default None so legacy
     # manifests load unchanged.
     approved_at: Optional[str] = None
+    # Phase 2: post-hoc score filter applied to per_frame.jsonl at read time.
+    # The detector persists everything ≥ SCORE_FLOOR (0.05); this is the
+    # cutoff the GUI shows by default and what `compute_stats_at_threshold`
+    # uses when no `?threshold=` override is passed.
+    display_threshold: float = 0.30
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -375,9 +380,10 @@ class StudentManifest:
     # Confidence-band thresholds used to bucket frames at training time.
     # Persisted on the manifest so the run is reproducible from manifest.json
     # alone — i.e. someone reading the file later can answer "what filter
-    # produced this Student's training set?" without grepping logs. All
-    # defaulted so older manifests without these keys still load.
-    t_high: float = 0.35
+    # produced this Student's training set?" without grepping logs. Phase 2
+    # renamed `t_high` → `export_threshold`; default tracks
+    # `RunManifest.display_threshold`.
+    export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
     # Trainer architecture (Phase 1.3). Defaulted to "yolov8n" so old
@@ -429,9 +435,9 @@ class StudentStats:
     # {"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int}
     per_teacher_buckets: list[dict[str, Any]] = field(default_factory=list)
     # Thresholds the trainer actually used. Stamped on the stats so the
-    # detail card can render "frame buckets at t_high=0.35, t_low=0.15"
-    # without re-reading the manifest.
-    t_high: float = 0.35
+    # detail card can render "frame buckets at export_threshold=0.30,
+    # t_low=0.15" without re-reading the manifest.
+    export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
     # ---- Phase 2.2 comparability fields ---------------------------------
@@ -608,6 +614,18 @@ def unapprove_run(rdir: Path) -> RunManifest:
     if manifest.approved_at is None:
         return manifest
     manifest.approved_at = None
+    write_manifest(rdir, manifest)
+    return manifest
+
+
+def set_display_threshold(rdir: Path, threshold: float) -> RunManifest:
+    """Persist a new `display_threshold` on the run's manifest.
+
+    Validation is at the API layer (Pydantic clamps to [0, 1]); this helper
+    trusts its input so the in-process callers don't have to re-validate.
+    """
+    manifest = read_manifest(rdir)
+    manifest.display_threshold = float(threshold)
     write_manifest(rdir, manifest)
     return manifest
 
@@ -794,7 +812,7 @@ def create_student(
     task: str,
     prompt: str,
     models: dict[str, str],
-    t_high: float = 0.35,
+    export_threshold: float = 0.30,
     t_low: float = 0.15,
     treat_empty_as_negative: bool = False,
     architecture: str = "yolov8n",
@@ -811,7 +829,7 @@ def create_student(
     Student is trained but not evaluated for transferability (the trainer
     will skip the held-out mAP step).
 
-    The confidence-band thresholds (`t_high`, `t_low`,
+    The confidence-band thresholds (`export_threshold`, `t_low`,
     `treat_empty_as_negative`) are recorded on the manifest at creation
     time so the run is reproducible from manifest.json alone.
     """
@@ -833,7 +851,7 @@ def create_student(
         prompt=prompt,
         started_at=_now_iso(),
         models=models,
-        t_high=t_high,
+        export_threshold=export_threshold,
         t_low=t_low,
         treat_empty_as_negative=treat_empty_as_negative,
         architecture=architecture,
@@ -1026,6 +1044,57 @@ def compute_detection_breakdown(
         "per_frame_count_avg": float(avg_count),
         "per_frame_count_histogram": hist_str,
     }
+
+
+def compute_stats_at_threshold(rdir: Path, threshold: float) -> Optional[RunStats]:
+    """Re-derive `RunStats` from per_frame.jsonl with `score >= threshold`.
+
+    The on-disk `stats.json` carries the *base* numbers — everything at or
+    above the detector's `SCORE_FLOOR`. Phase 2 added a post-hoc filter
+    knob; the API filters detections at request time so the user can drag
+    the inspector slider without rerunning the detector.
+
+    Returns None when the run has no `stats.json` yet (still in progress)
+    or no `per_frame.jsonl` to filter from. Timing fields are pulled from
+    the base stats unchanged — the detector's per-frame ms doesn't shift
+    with a confidence cutoff.
+    """
+    base = read_stats(rdir)
+    if base is None:
+        return None
+    pf_path = rdir / LABELS_DIR / PER_FRAME_NAME
+    if not pf_path.exists():
+        return base
+
+    def _filtered_records() -> Iterable[dict]:
+        for rec in read_per_frame(rdir):
+            dets = rec.get("detections", []) or []
+            kept = [d for d in dets if float(d.get("score", 0.0)) >= threshold]
+            new_rec = dict(rec)
+            new_rec["detections"] = kept
+            yield new_rec
+
+    breakdown = compute_detection_breakdown(
+        _filtered_records(), frames_processed=base.frames_processed
+    )
+
+    n_detections_total = sum(
+        cls["n_detections"] for cls in breakdown["detections_per_class"].values()
+    )
+    frames_with_detections = sum(
+        n for k, n in breakdown["per_frame_count_histogram"].items() if int(k) > 0
+    )
+
+    return RunStats(
+        frames_processed=base.frames_processed,
+        frames_with_detections=frames_with_detections,
+        total_ms=base.total_ms,
+        avg_ms_per_frame=base.avg_ms_per_frame,
+        p50_ms_per_frame=base.p50_ms_per_frame,
+        p95_ms_per_frame=base.p95_ms_per_frame,
+        n_detections_total=n_detections_total,
+        **breakdown,
+    )
 
 
 def read_per_frame(rdir: Path) -> Iterable[dict]:
