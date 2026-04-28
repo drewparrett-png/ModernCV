@@ -212,9 +212,10 @@ def _now_iso() -> str:
 def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
     """Build labels/coco.json from the just-written per_frame.jsonl.
 
-    The Student trainer reads this as its ground truth. Rejections (curated
-    in the Inspector) are filtered out at write time so the COCO file is
-    always *the curated dataset* — no second pass needed downstream.
+    Phase 3: this writes the *unfiltered* COCO — every detection at the
+    score floor is persisted, with `det_idx` carried on each annotation.
+    The Student trainer reads this and applies per-frame review state +
+    threshold filtering itself in `pipeline.distill.prepare_yolo_dataset`.
 
     Frame dimensions come from cv2 — one capture is cheap and gives us the
     canonical (height, width) the boxes were produced at.
@@ -225,8 +226,6 @@ def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
     if not per_frame_path.exists():
         log.warning("no per_frame.jsonl at %s; skipping coco export", per_frame_path)
         return
-
-    rejections = runs_mod.read_rejections(rdir)
 
     cap = cv2.VideoCapture(video_path)
     try:
@@ -254,12 +253,10 @@ def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
             if frame_idx < 0:
                 continue
             dets = rec.get("detections") or []
-            rejected = set(rejections.get(frame_idx, []))
-            kept = [d for i, d in enumerate(dets) if i not in rejected]
 
-            # Always record the image, even if no kept detections — the
-            # Student needs negative frames too (frames where the target
-            # is genuinely absent contribute precision signal).
+            # Always record the image, even if no detections — the Student
+            # needs negative frames too (frames where the target is
+            # genuinely absent contribute precision signal).
             images.append(
                 {
                     "id": frame_idx,
@@ -268,7 +265,7 @@ def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
                     "height": h,
                 }
             )
-            for d in kept:
+            for det_idx, d in enumerate(dets):
                 cname = d.get("class_name") or "object"
                 if cname not in class_to_id:
                     class_to_id[cname] = len(class_names) + 1
@@ -281,6 +278,9 @@ def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
                     {
                         "id": ann_id,
                         "image_id": frame_idx,
+                        # Phase 3: stable position-within-frame so distill
+                        # can match against rejected_dets in frame_states.json.
+                        "det_idx": det_idx,
                         "category_id": cid,
                         "bbox": [x1, y1, bw, bh],
                         "area": bw * bh,
@@ -298,11 +298,10 @@ def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
         category_names=class_names,
     )
     log.info(
-        "wrote coco.json: %d images, %d annotations, %d classes (rejected %d)",
+        "wrote coco.json: %d images, %d annotations, %d classes",
         len(images),
         len(annotations),
         len(class_names),
-        sum(len(v) for v in rejections.values()),
     )
 
 

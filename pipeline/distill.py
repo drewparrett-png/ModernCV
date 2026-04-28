@@ -103,8 +103,17 @@ class DatasetSummary:
     n_uncertain_dropped: int = 0
     n_true_negative_frames: int = 0
     # Per-train-teacher bucket breakdown:
-    # [{"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int}, ...]
+    # [{"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int,
+    #   "n_frames_curated": int, "n_frames_confirmed_empty": int,
+    #   "n_frames_marked_missed": int, "n_frames_unreviewed_used": int}, ...]
     per_teacher_buckets: list[dict] = field(default_factory=list)
+    # Phase 3 review-source counters — see schemas.StudentStatsModel for
+    # the exact semantics. Sum across teachers; per-teacher buckets carry
+    # the same split.
+    n_frames_curated: int = 0
+    n_frames_confirmed_empty: int = 0
+    n_frames_marked_missed: int = 0
+    n_frames_unreviewed_used: int = 0
 
 
 @dataclass
@@ -187,6 +196,83 @@ def classify_frames(
             # with nothing convincing. Strongest "really empty" signal.
             buckets.true_negative.append(frame_id)
     return buckets
+
+
+def _apply_frame_state_overrides(
+    coco: dict, frame_states: dict[int, dict]
+) -> dict[str, int]:
+    """Filter a teacher's COCO dict in place per Phase 3 review state.
+
+    Three rules, applied in order:
+
+      • `marked_missed` — image and all its annotations are removed entirely.
+        These frames represent "the model was wrong here" — we can't trust
+        the labels, so the trainer never sees them.
+      • `confirmed_empty` — image kept, all its annotations dropped. Forces
+        the frame into the `true_negative` bucket regardless of
+        `treat_empty_as_negative`. The Student trains on it as a true
+        background.
+      • `curated` — image kept, annotations whose `det_idx` is in the
+        user's `rejected_dets` are dropped; surviving annotations flow
+        into the threshold bucketing as usual.
+
+    Frames without a state entry are unchanged. Returns a counters dict
+    with the four review-source totals.
+
+    Caller passes a fresh COCO (loaded per-call from JSON), so in-place
+    mutation is safe.
+    """
+    counters = {
+        "n_frames_curated": 0,
+        "n_frames_confirmed_empty": 0,
+        "n_frames_marked_missed": 0,
+    }
+    if not frame_states:
+        return counters
+
+    images_kept: list[dict] = []
+    dropped_image_ids: set[int] = set()
+    for img in coco.get("images", []):
+        fi = int(img["id"])
+        entry = frame_states.get(fi)
+        if entry is None:
+            images_kept.append(img)
+            continue
+        state = entry.get("state")
+        if state == "marked_missed":
+            counters["n_frames_marked_missed"] += 1
+            dropped_image_ids.add(fi)
+            continue
+        images_kept.append(img)
+        if state == "confirmed_empty":
+            counters["n_frames_confirmed_empty"] += 1
+        elif state == "curated":
+            counters["n_frames_curated"] += 1
+    coco["images"] = images_kept
+
+    new_anns: list[dict] = []
+    for ann in coco.get("annotations", []):
+        fi = int(ann.get("image_id", -1))
+        if fi in dropped_image_ids:
+            continue
+        entry = frame_states.get(fi)
+        if entry is None:
+            new_anns.append(ann)
+            continue
+        state = entry.get("state")
+        if state == "confirmed_empty":
+            continue  # forced negative — drop every annotation
+        if state == "curated":
+            rejected = set(entry.get("rejected_dets") or [])
+            det_idx = ann.get("det_idx")
+            # det_idx was added by `_write_teacher_coco` (Phase 3). Pre-Phase-3
+            # COCOs without det_idx can't be safely filtered here — but the
+            # `runs/` wipe at Phase 1 means we never see them in practice.
+            if det_idx is not None and int(det_idx) in rejected:
+                continue
+        new_anns.append(ann)
+    coco["annotations"] = new_anns
+    return counters
 
 
 def _read_teacher_coco(project_id: str, teacher_id: str) -> tuple[dict, str]:
@@ -405,9 +491,28 @@ def prepare_yolo_dataset(
     n_true_negative_total = 0
     per_teacher_buckets: list[dict] = []
 
+    # Phase 3 review-source totals.
+    n_curated_total = 0
+    n_confirmed_empty_total = 0
+    n_marked_missed_total = 0
+    n_unreviewed_used_total = 0
+
     for tid in train_teacher_ids:
         coco, video_path = _read_teacher_coco(project_id, tid)
         cat_map = per_teacher_map[tid]
+
+        # Phase 3: load this teacher's per-frame review state and apply the
+        # three overrides (curated / confirmed_empty / marked_missed) BEFORE
+        # the threshold bucketing. The bucketing then sees a COCO that
+        # already reflects the user's verdict — no special-casing inside
+        # `classify_frames` needed.
+        rdir = runs_mod.run_dir(project_id, tid)
+        frame_states = runs_mod.read_frame_states(rdir)
+        override_counts = _apply_frame_state_overrides(coco, frame_states)
+        n_curated_total += override_counts["n_frames_curated"]
+        n_confirmed_empty_total += override_counts["n_frames_confirmed_empty"]
+        n_marked_missed_total += override_counts["n_frames_marked_missed"]
+
         # Index COCO annotations by image_id so we don't re-scan per image.
         anns_by_image: dict[int, list[dict]] = {}
         for ann in coco.get("annotations", []):
@@ -423,11 +528,27 @@ def prepare_yolo_dataset(
         n_uncertain = len(buckets.uncertain)
         n_true_negative = len(buckets.true_negative)
 
+        # Count unreviewed frames that survived bucketing into a kept
+        # bucket (positive or true_negative). These are frames the user
+        # never looked at; the threshold bucketing decided their fate.
+        # `uncertain` frames that get dropped don't count as "used".
+        kept_for_training = set(buckets.positive) | set(buckets.true_negative)
+        if treat_empty_as_negative:
+            kept_for_training |= set(buckets.uncertain)
+        teacher_unreviewed_used = sum(
+            1 for fi in kept_for_training if fi not in frame_states
+        )
+        n_unreviewed_used_total += teacher_unreviewed_used
+
         per_teacher_buckets.append({
             "teacher_id": tid,
             "positive": n_positive,
             "uncertain": n_uncertain,
             "true_negative": n_true_negative,
+            "n_frames_curated": override_counts["n_frames_curated"],
+            "n_frames_confirmed_empty": override_counts["n_frames_confirmed_empty"],
+            "n_frames_marked_missed": override_counts["n_frames_marked_missed"],
+            "n_frames_unreviewed_used": teacher_unreviewed_used,
         })
 
         # Effective bucketing for this run: in escape-hatch mode the
@@ -585,6 +706,10 @@ def prepare_yolo_dataset(
         n_uncertain_dropped=n_uncertain_dropped_total,
         n_true_negative_frames=n_true_negative_total,
         per_teacher_buckets=per_teacher_buckets,
+        n_frames_curated=n_curated_total,
+        n_frames_confirmed_empty=n_confirmed_empty_total,
+        n_frames_marked_missed=n_marked_missed_total,
+        n_frames_unreviewed_used=n_unreviewed_used_total,
     )
 
 

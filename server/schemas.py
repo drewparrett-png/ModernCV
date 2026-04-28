@@ -164,7 +164,13 @@ class RunManifestModel(BaseModel):
     models: dict[str, str] = Field(default_factory=dict)
     error: Optional[str] = None
     approved_at: Optional[str] = None
-    review_status: Literal["unreviewed", "reviewed", "approved"] = "unreviewed"
+    # Phase 3: tightened bar — "approved" requires every processed frame to
+    # carry an explicit per-frame state (curated / confirmed_empty /
+    # marked_missed). "in_progress" means at least one frame has a state
+    # but not all of them. Status is *derived* from `frame_states.json` +
+    # `progress.json`; `approved_at` is the timestamp stamped when coverage
+    # flips to 100%.
+    review_status: Literal["unreviewed", "in_progress", "approved"] = "unreviewed"
     # Phase 2: post-hoc score filter the GUI applies by default. The
     # detector persists every detection at SCORE_FLOOR=0.05; the inspector
     # slider PATCHes this field to change the canonical view without
@@ -233,27 +239,53 @@ class RunsResponse(BaseModel):
     runs: list[RunManifestModel]
 
 
-class ApproveResponse(BaseModel):
-    """Response for /runs/:id/approve and /runs/:id/unapprove. Only the
-    manifest can change — stats/progress aren't touched — so the wire
-    surface stays minimal."""
-
-    manifest: RunManifestModel
+# ---- Per-frame review state (Phase 3) -------------------------------------
 
 
-class RejectionsResponse(BaseModel):
-    """Curated rejections for one run.
+FrameState = Literal["curated", "confirmed_empty", "marked_missed"]
 
-    Keyed by frame index (string in JSON; React parses back to number) →
-    list of detection indices within that frame's per_frame.jsonl entry.
+
+class FrameStateEntry(BaseModel):
+    """One frame's review verdict.
+
+    `curated` — the user looked at the model's detections and approved
+    what's left after `rejected_dets` are dropped.
+    `confirmed_empty` — the user confirmed the frame is genuinely empty
+    (forced true negative for the Student trainer).
+    `marked_missed` — the user noticed the model missed something; the
+    labels here can't be trusted, so distill drops the frame entirely.
+
+    `rejected_dets` is only meaningful with `state == "curated"` and is
+    enforced as empty otherwise by the endpoint.
     """
 
-    rejections: dict[str, list[int]] = Field(default_factory=dict)
+    state: FrameState
+    rejected_dets: list[int] = Field(default_factory=list)
 
 
-class RejectToggleRequest(BaseModel):
-    frame_idx: int
-    det_idx: int
+class FrameStatesResponse(BaseModel):
+    """Map of frame_idx (str — JSON key) → entry.
+
+    String keys for transport; `RunInspector` re-keys with `String(idx)`
+    on the GUI side.
+    """
+
+    frame_states: dict[str, FrameStateEntry] = Field(default_factory=dict)
+
+
+class PutFrameStateRequest(BaseModel):
+    """Body of `PUT /projects/{pid}/runs/{rid}/frame_states/{frame_idx}`.
+
+    `rejected_dets` is `None` (not [] — that's an explicit empty list, ie
+    "curated with no rejections") so we can distinguish "client didn't
+    send the field" from "client wants to clear all rejections" if it
+    matters. In practice clients always send a list with `state="curated"`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: FrameState
+    rejected_dets: Optional[list[int]] = None
 
 
 # ---- Optimize / Students ---------------------------------------------------
@@ -375,12 +407,21 @@ class PerTrainTeacherBucket(BaseModel):
     Mirrors the dict shape produced by `pipeline.distill.prepare_yolo_dataset`
     so old `stats.json` files (pre-Phase-0.6) that stored this as a plain
     dict still round-trip without migration.
+
+    Phase 3 added the four `n_frames_*` review-source counters so the
+    Student detail card can show "where the training signal came from" —
+    same total as positive+uncertain+true_negative, sliced by review state
+    instead.
     """
 
     teacher_id: str
     positive: int = 0
     uncertain: int = 0
     true_negative: int = 0
+    n_frames_curated: int = 0
+    n_frames_confirmed_empty: int = 0
+    n_frames_marked_missed: int = 0
+    n_frames_unreviewed_used: int = 0
 
 
 class StudentStatsModel(BaseModel):
@@ -402,6 +443,19 @@ class StudentStatsModel(BaseModel):
     n_uncertain_dropped: int = 0
     n_true_negative_frames: int = 0
     per_teacher_buckets: list[PerTrainTeacherBucket] = Field(default_factory=list)
+    # ---- Phase 3 review-source counters ---------------------------------
+    # Same training-frame total as positive+uncertain+true_negative, but
+    # sliced by what drove each frame into the trainer:
+    #   curated         — frame state set, train labels = score-filtered
+    #                     dets minus the user's rejected_dets list
+    #   confirmed_empty — frame state set, forced true negative
+    #   marked_missed   — frame state set, frame DROPPED (not in trainer)
+    #   unreviewed_used — no frame state, fell through to threshold bucketing
+    #                     and ended up in positive or true_negative
+    n_frames_curated: int = 0
+    n_frames_confirmed_empty: int = 0
+    n_frames_marked_missed: int = 0
+    n_frames_unreviewed_used: int = 0
     # Stamp the thresholds used by the trainer so the detail card shows
     # "buckets at export_threshold=0.30" without re-reading the manifest.
     export_threshold: float = 0.30

@@ -150,9 +150,23 @@ def test_treat_empty_as_negative_reproduces_old_image_and_annotation_counts(
     assert summary.n_positive_frames == 5
     assert summary.n_uncertain_dropped == 0  # explicitly zeroed in escape-hatch mode
     assert summary.n_true_negative_frames == 1
-    assert summary.per_teacher_buckets == [
-        {"teacher_id": "teacher_a", "positive": 5, "uncertain": 0, "true_negative": 1}
-    ]
+    # Threshold-bucket fields exact; Phase 3 review-source fields are
+    # zero (no frame_states.json present in this test fixture).
+    assert len(summary.per_teacher_buckets) == 1
+    bucket = summary.per_teacher_buckets[0]
+    assert bucket["teacher_id"] == "teacher_a"
+    assert bucket["positive"] == 5
+    assert bucket["uncertain"] == 0
+    assert bucket["true_negative"] == 1
+    assert bucket["n_frames_curated"] == 0
+    assert bucket["n_frames_confirmed_empty"] == 0
+    assert bucket["n_frames_marked_missed"] == 0
+    # Every frame survived bucketing without a frame_state → all kept frames
+    # land in n_frames_unreviewed_used. With treat_empty_as_negative=True,
+    # uncertain frames also count as "kept" (so even though there are 0
+    # uncertain in this fixture, the union is just positive ∪ true_negative
+    # ∪ uncertain = 6).
+    assert bucket["n_frames_unreviewed_used"] == 6
 
 
 def test_strict_mode_drops_uncertain_frames(

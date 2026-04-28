@@ -1,12 +1,15 @@
-"""Phase 0: dataset review state — project-scoped (Phase 1 rearchitecture).
+"""Phase 3: per-frame review state — disk + endpoint coverage.
 
 Two surfaces under test:
 
-1. The disk-side derivation rule (`derive_review_status`) — `approved_at`
-   wins; otherwise non-empty rejections file → "reviewed"; otherwise →
-   "unreviewed". Plus the cheap `has_any_rejections` helper.
-2. The /projects/{pid}/runs/{id}/approve · /unapprove endpoints — 404 / 400
-   / no-op semantics, and round-trip persistence.
+1. The disk-side `read_frame_states` / `write_frame_states` /
+   `set_frame_state` / `unset_frame_state` helpers and the
+   `derive_review_status` rule layered on top: "approved" iff every
+   processed frame has a state entry; "in_progress" iff some but not
+   all do; "unreviewed" otherwise.
+2. The /projects/{pid}/runs/{id}/frame_states surface — GET, PUT,
+   DELETE — with validation behavior (400 for bad shapes / out-of-range
+   det indices) and round-trip persistence.
 """
 
 from __future__ import annotations
@@ -46,8 +49,28 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def _seed_per_frame(rdir: Path, frame_dets: dict[int, int]) -> None:
+    """Write a minimal per_frame.jsonl with `frame_dets[fi]` placeholder
+    detections per frame index. Used by tests that need
+    `_count_processed_frames` and rejected_dets bounds-checking to work."""
+    pf_path = rdir / runs_mod.LABELS_DIR / runs_mod.PER_FRAME_NAME
+    pf_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for fi, n in frame_dets.items():
+        rec = {
+            "frame_idx": fi,
+            "detections": [{"score": 0.9, "class_name": "x"} for _ in range(n)],
+        }
+        lines.append(json.dumps(rec))
+    pf_path.write_text("\n".join(lines) + "\n")
+
+
 def _make_completed_run(
-    project_id: str, prompt: str = "test prompt"
+    project_id: str,
+    *,
+    n_frames: int = 3,
+    dets_per_frame: int = 1,
+    prompt: str = "test prompt",
 ) -> Path:
     rdir, _ = runs_mod.create_run(
         project_id=project_id,
@@ -56,81 +79,150 @@ def _make_completed_run(
         video_path="data/x.mp4",
         models={"detect": "groundingdino"},
     )
+    _seed_per_frame(rdir, {i: dets_per_frame for i in range(n_frames)})
     runs_mod.mark_completed(rdir)
     return rdir
 
 
-# ---- has_any_rejections ----------------------------------------------------
+# ---- read/write_frame_states ----------------------------------------------
 
 
-def test_has_any_rejections_missing_file(tmp_path: Path) -> None:
-    assert runs_mod.has_any_rejections(tmp_path) is False
+def test_read_frame_states_missing_file(tmp_path: Path) -> None:
+    assert runs_mod.read_frame_states(tmp_path) == {}
 
 
-def test_has_any_rejections_empty_dict(tmp_path: Path) -> None:
-    (tmp_path / runs_mod.REJECTIONS_NAME).write_text("{}")
-    assert runs_mod.has_any_rejections(tmp_path) is False
+def test_read_frame_states_malformed_json_is_empty(tmp_path: Path) -> None:
+    (tmp_path / runs_mod.FRAME_STATES_NAME).write_text("{not valid json")
+    assert runs_mod.read_frame_states(tmp_path) == {}
 
 
-def test_has_any_rejections_only_empty_lists(tmp_path: Path) -> None:
-    (tmp_path / runs_mod.REJECTIONS_NAME).write_text(json.dumps({"5": []}))
-    assert runs_mod.has_any_rejections(tmp_path) is False
-
-
-def test_has_any_rejections_populated(tmp_path: Path) -> None:
-    (tmp_path / runs_mod.REJECTIONS_NAME).write_text(
-        json.dumps({"5": [0, 2], "12": [1]})
+def test_read_frame_states_filters_unknown_states(tmp_path: Path) -> None:
+    (tmp_path / runs_mod.FRAME_STATES_NAME).write_text(
+        json.dumps(
+            {
+                "1": {"state": "curated", "rejected_dets": [0]},
+                "2": {"state": "bogus"},
+                "3": {"state": "confirmed_empty"},
+            }
+        )
     )
-    assert runs_mod.has_any_rejections(tmp_path) is True
+    states = runs_mod.read_frame_states(tmp_path)
+    assert set(states.keys()) == {1, 3}
+    assert states[1] == {"state": "curated", "rejected_dets": [0]}
+    assert states[3] == {"state": "confirmed_empty", "rejected_dets": []}
 
 
-def test_has_any_rejections_malformed_json_is_false(tmp_path: Path) -> None:
-    (tmp_path / runs_mod.REJECTIONS_NAME).write_text("{not valid json")
-    assert runs_mod.has_any_rejections(tmp_path) is False
+def test_write_frame_states_omits_empty_rejected_dets(tmp_path: Path) -> None:
+    runs_mod.write_frame_states(
+        tmp_path,
+        {
+            5: {"state": "curated", "rejected_dets": []},
+            7: {"state": "confirmed_empty", "rejected_dets": []},
+        },
+    )
+    raw = json.loads((tmp_path / runs_mod.FRAME_STATES_NAME).read_text())
+    # Curated with no rejections still serialises (no rejected_dets key);
+    # confirmed_empty likewise drops the empty list.
+    assert raw == {
+        "5": {"state": "curated"},
+        "7": {"state": "confirmed_empty"},
+    }
 
 
-# ---- derive_review_status --------------------------------------------------
+# ---- set_frame_state validation -------------------------------------------
 
 
-def test_review_status_unreviewed_default(project: runs_mod.Project) -> None:
+def test_set_frame_state_curated_with_rejected_dets(
+    project: runs_mod.Project,
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    entry = runs_mod.set_frame_state(rdir, 1, "curated", rejected_dets=[0])
+    assert entry == {"state": "curated", "rejected_dets": [0]}
+    states = runs_mod.read_frame_states(rdir)
+    assert states[1] == entry
+
+
+def test_set_frame_state_rejected_dets_with_non_curated_raises(
+    project: runs_mod.Project,
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    with pytest.raises(ValueError, match="rejected_dets only allowed"):
+        runs_mod.set_frame_state(rdir, 1, "confirmed_empty", rejected_dets=[0])
+
+
+def test_set_frame_state_invalid_state_raises(
+    project: runs_mod.Project,
+) -> None:
     rdir = _make_completed_run(project.id)
+    with pytest.raises(ValueError, match="invalid state"):
+        runs_mod.set_frame_state(rdir, 0, "approved")  # type: ignore[arg-type]
+
+
+def test_set_frame_state_out_of_range_det_idx_raises(
+    project: runs_mod.Project,
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    with pytest.raises(ValueError, match="out of range"):
+        runs_mod.set_frame_state(rdir, 1, "curated", rejected_dets=[5])
+
+
+def test_set_frame_state_unknown_frame_raises(
+    project: runs_mod.Project,
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    with pytest.raises(ValueError, match="not found"):
+        runs_mod.set_frame_state(rdir, 99, "curated", rejected_dets=[0])
+
+
+# ---- approved_at auto-stamping --------------------------------------------
+
+
+def test_approved_at_stamps_when_all_frames_covered(
+    project: runs_mod.Project,
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=1)
+    runs_mod.set_frame_state(rdir, 0, "confirmed_empty")
+    runs_mod.set_frame_state(rdir, 1, "marked_missed")
+    # Up to here, only 2 of 3 frames have state — manifest stays unstamped.
+    assert runs_mod.read_manifest(rdir).approved_at is None
+    runs_mod.set_frame_state(rdir, 2, "curated")
+    assert runs_mod.read_manifest(rdir).approved_at is not None
+
+
+def test_unset_frame_state_clears_approved_at(
+    project: runs_mod.Project,
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=2, dets_per_frame=1)
+    runs_mod.set_frame_state(rdir, 0, "confirmed_empty")
+    runs_mod.set_frame_state(rdir, 1, "confirmed_empty")
+    assert runs_mod.read_manifest(rdir).approved_at is not None
+    runs_mod.unset_frame_state(rdir, 1)
+    assert runs_mod.read_manifest(rdir).approved_at is None
+
+
+# ---- derive_review_status -------------------------------------------------
+
+
+def test_review_status_unreviewed_no_states(project: runs_mod.Project) -> None:
+    rdir = _make_completed_run(project.id, n_frames=3)
     assert runs_mod.derive_review_status(rdir) == "unreviewed"
 
 
-def test_review_status_reviewed_when_rejections_present(
+def test_review_status_in_progress_partial_coverage(
     project: runs_mod.Project,
 ) -> None:
-    rdir = _make_completed_run(project.id)
-    runs_mod.toggle_rejection(rdir, frame_idx=3, det_idx=0)
-    assert runs_mod.derive_review_status(rdir) == "reviewed"
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=1)
+    runs_mod.set_frame_state(rdir, 0, "confirmed_empty")
+    assert runs_mod.derive_review_status(rdir) == "in_progress"
 
 
-def test_review_status_approved_overrides_rejections(
+def test_review_status_approved_full_coverage(
     project: runs_mod.Project,
 ) -> None:
-    rdir = _make_completed_run(project.id)
-    runs_mod.toggle_rejection(rdir, frame_idx=3, det_idx=0)
-    runs_mod.approve_run(rdir)
+    rdir = _make_completed_run(project.id, n_frames=2, dets_per_frame=1)
+    runs_mod.set_frame_state(rdir, 0, "confirmed_empty")
+    runs_mod.set_frame_state(rdir, 1, "marked_missed")
     assert runs_mod.derive_review_status(rdir) == "approved"
-
-
-def test_review_status_unapprove_falls_back_to_reviewed(
-    project: runs_mod.Project,
-) -> None:
-    rdir = _make_completed_run(project.id)
-    runs_mod.toggle_rejection(rdir, frame_idx=3, det_idx=0)
-    runs_mod.approve_run(rdir)
-    runs_mod.unapprove_run(rdir)
-    assert runs_mod.derive_review_status(rdir) == "reviewed"
-
-
-def test_review_status_unapprove_with_no_rejections_is_unreviewed(
-    project: runs_mod.Project,
-) -> None:
-    rdir = _make_completed_run(project.id)
-    runs_mod.approve_run(rdir)
-    runs_mod.unapprove_run(rdir)
-    assert runs_mod.derive_review_status(rdir) == "unreviewed"
 
 
 def test_legacy_manifest_without_approved_at_field_loads(
@@ -159,134 +251,124 @@ def test_legacy_manifest_without_approved_at_field_loads(
     assert runs_mod.derive_review_status(rdir) == "unreviewed"
 
 
-# ---- Persistence ----------------------------------------------------------
-
-
-def test_approve_persists_across_reread(project: runs_mod.Project) -> None:
-    rdir = _make_completed_run(project.id)
-    runs_mod.approve_run(rdir)
-    reread = runs_mod.read_manifest(rdir)
-    assert reread.approved_at is not None
-    raw = json.loads((rdir / runs_mod.MANIFEST_NAME).read_text())
-    assert raw["approved_at"] == reread.approved_at
-
-
-def test_approve_is_idempotent_does_not_drift_timestamp(
-    project: runs_mod.Project,
-) -> None:
-    rdir = _make_completed_run(project.id)
-    first = runs_mod.approve_run(rdir)
-    second = runs_mod.approve_run(rdir)
-    assert first.approved_at is not None
-    assert second.approved_at == first.approved_at
-
-
 # ---- Endpoints -------------------------------------------------------------
 
 
-def test_approve_endpoint_happy_path(
+def test_get_frame_states_empty_for_new_run(
     project: runs_mod.Project, client: TestClient
 ) -> None:
     rdir = _make_completed_run(project.id)
-    res = client.post(f"/projects/{project.id}/runs/{rdir.name}/approve")
+    res = client.get(f"/projects/{project.id}/runs/{rdir.name}/frame_states")
     assert res.status_code == 200
-    body = res.json()
-    assert body["manifest"]["approved_at"] is not None
-    assert body["manifest"]["review_status"] == "approved"
-    assert body["manifest"]["project_id"] == project.id
+    assert res.json() == {"frame_states": {}}
 
 
-def test_approve_endpoint_404_for_missing_run(
+def test_put_frame_state_curated(
     project: runs_mod.Project, client: TestClient
 ) -> None:
-    res = client.post(f"/projects/{project.id}/runs/teacher_does_not_exist/approve")
-    assert res.status_code == 404
-
-
-def test_approve_endpoint_404_for_missing_project(client: TestClient) -> None:
-    res = client.post("/projects/proj_no_such/runs/teacher_x/approve")
-    assert res.status_code == 404
-
-
-def test_approve_endpoint_400_for_running_run(
-    project: runs_mod.Project, client: TestClient
-) -> None:
-    rdir, _ = runs_mod.create_run(
-        project_id=project.id,
-        task="detection",
-        prompt="still running",
-        video_path="data/x.mp4",
-        models={},
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    res = client.put(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/1",
+        json={"state": "curated", "rejected_dets": [0]},
     )
-    res = client.post(f"/projects/{project.id}/runs/{rdir.name}/approve")
-    assert res.status_code == 400
-    assert "completed" in res.json()["detail"]
+    assert res.status_code == 200
+    assert res.json() == {"state": "curated", "rejected_dets": [0]}
+
+    # Round-trip via GET.
+    got = client.get(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states"
+    ).json()
+    assert got == {
+        "frame_states": {"1": {"state": "curated", "rejected_dets": [0]}}
+    }
 
 
-def test_approve_endpoint_400_for_failed_run(
+def test_put_frame_state_rejected_dets_with_non_curated_400(
     project: runs_mod.Project, client: TestClient
 ) -> None:
-    rdir, _ = runs_mod.create_run(
-        project_id=project.id,
-        task="detection",
-        prompt="will fail",
-        video_path="data/x.mp4",
-        models={},
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    res = client.put(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/1",
+        json={"state": "confirmed_empty", "rejected_dets": [0]},
     )
-    runs_mod.mark_failed(rdir, error="boom")
-    res = client.post(f"/projects/{project.id}/runs/{rdir.name}/approve")
     assert res.status_code == 400
 
 
-def test_approve_endpoint_idempotent_on_already_approved(
+def test_put_frame_state_out_of_range_400(
     project: runs_mod.Project, client: TestClient
 ) -> None:
-    rdir = _make_completed_run(project.id)
-    first = client.post(f"/projects/{project.id}/runs/{rdir.name}/approve").json()
-    second = client.post(f"/projects/{project.id}/runs/{rdir.name}/approve").json()
-    assert first["manifest"]["approved_at"] == second["manifest"]["approved_at"]
+    rdir = _make_completed_run(project.id, n_frames=3, dets_per_frame=2)
+    res = client.put(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/1",
+        json={"state": "curated", "rejected_dets": [99]},
+    )
+    assert res.status_code == 400
 
 
-def test_unapprove_endpoint_clears_field(
+def test_put_frame_state_404_for_missing_run(
     project: runs_mod.Project, client: TestClient
 ) -> None:
-    rdir = _make_completed_run(project.id)
-    client.post(f"/projects/{project.id}/runs/{rdir.name}/approve")
-    res = client.post(f"/projects/{project.id}/runs/{rdir.name}/unapprove")
-    assert res.status_code == 200
-    body = res.json()
-    assert body["manifest"]["approved_at"] is None
-    assert body["manifest"]["review_status"] == "unreviewed"
-
-
-def test_unapprove_endpoint_404_for_missing_run(
-    project: runs_mod.Project, client: TestClient
-) -> None:
-    res = client.post(
-        f"/projects/{project.id}/runs/teacher_does_not_exist/unapprove"
+    res = client.put(
+        f"/projects/{project.id}/runs/teacher_does_not_exist/frame_states/0",
+        json={"state": "curated"},
     )
     assert res.status_code == 404
 
 
-def test_unapprove_endpoint_no_op_on_unapproved_run(
+def test_delete_frame_state_204(
+    project: runs_mod.Project, client: TestClient
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=2, dets_per_frame=1)
+    client.put(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/0",
+        json={"state": "confirmed_empty"},
+    )
+    res = client.delete(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/0"
+    )
+    assert res.status_code == 204
+    got = client.get(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states"
+    ).json()
+    assert got["frame_states"] == {}
+
+
+def test_delete_frame_state_no_op_on_missing_entry(
     project: runs_mod.Project, client: TestClient
 ) -> None:
     rdir = _make_completed_run(project.id)
-    res = client.post(f"/projects/{project.id}/runs/{rdir.name}/unapprove")
-    assert res.status_code == 200
-    assert res.json()["manifest"]["approved_at"] is None
+    res = client.delete(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/0"
+    )
+    assert res.status_code == 204
 
 
 def test_runs_list_serves_review_status_for_each(
     project: runs_mod.Project, client: TestClient
 ) -> None:
-    a = _make_completed_run(project.id, prompt="alpha")
-    b = _make_completed_run(project.id, prompt="beta")
-    runs_mod.approve_run(b)
-    runs_mod.toggle_rejection(a, frame_idx=0, det_idx=0)
+    a = _make_completed_run(project.id, n_frames=2, prompt="alpha")
+    b = _make_completed_run(project.id, n_frames=2, prompt="beta")
+    # `a` is partially reviewed, `b` is fully reviewed.
+    runs_mod.set_frame_state(a, 0, "confirmed_empty")
+    runs_mod.set_frame_state(b, 0, "confirmed_empty")
+    runs_mod.set_frame_state(b, 1, "marked_missed")
 
     res = client.get(f"/projects/{project.id}/runs")
     assert res.status_code == 200
     statuses = {r["id"]: r["review_status"] for r in res.json()["runs"]}
-    assert statuses[a.name] == "reviewed"
+    assert statuses[a.name] == "in_progress"
     assert statuses[b.name] == "approved"
+
+
+def test_approved_at_stamped_via_endpoint(
+    project: runs_mod.Project, client: TestClient
+) -> None:
+    rdir = _make_completed_run(project.id, n_frames=1, dets_per_frame=1)
+    res = client.put(
+        f"/projects/{project.id}/runs/{rdir.name}/frame_states/0",
+        json={"state": "confirmed_empty"},
+    )
+    assert res.status_code == 200
+    detail = client.get(f"/projects/{project.id}/runs/{rdir.name}").json()
+    assert detail["manifest"]["review_status"] == "approved"
+    assert detail["manifest"]["approved_at"] is not None

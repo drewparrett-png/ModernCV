@@ -11,6 +11,7 @@ patch-name-only, delete. Plus the Phase 1 invariants:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -192,13 +193,22 @@ def test_summary_counts_teachers_and_students(
     ).json()
     pid = p["id"]
 
-    # Two completed teachers, one of them approved (counts as "human-reviewed").
+    # Two completed teachers, one of them fully reviewed via per-frame
+    # state (Phase 3 strict bar — only "approved" counts toward
+    # n_human_reviewed_datasets).
     rdir1, _ = runs_mod.create_run(
         project_id=pid, task="detection", prompt="t1",
         video_path="x.mp4", models={},
     )
+    # Seed a one-frame per_frame.jsonl so derive_review_status has
+    # something to count coverage against.
+    pf1 = rdir1 / runs_mod.LABELS_DIR / runs_mod.PER_FRAME_NAME
+    pf1.parent.mkdir(parents=True, exist_ok=True)
+    pf1.write_text(
+        json.dumps({"frame_idx": 0, "detections": []}) + "\n"
+    )
     runs_mod.mark_completed(rdir1)
-    runs_mod.approve_run(rdir1)
+    runs_mod.set_frame_state(rdir1, 0, "confirmed_empty")
 
     rdir2, _ = runs_mod.create_run(
         project_id=pid, task="detection", prompt="t2",

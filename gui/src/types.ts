@@ -107,7 +107,24 @@ export interface LearnRequest {
   max_frames?: number;
 }
 
-export type ReviewStatus = "unreviewed" | "reviewed" | "approved";
+/** Phase 3: a run is "approved" only when every processed frame carries an
+ *  explicit per-frame state. "in_progress" means at least one but not all
+ *  frames have been reviewed. */
+export type ReviewStatus = "unreviewed" | "in_progress" | "approved";
+
+/** Per-frame review verdict (Phase 3). See server/schemas.py FrameStateEntry. */
+export type FrameState = "curated" | "confirmed_empty" | "marked_missed";
+
+export interface FrameStateEntry {
+  state: FrameState;
+  /** Detection indices the user rejected on this frame. Only meaningful
+   *  when `state === "curated"` (server returns []) for the other two. */
+  rejected_dets: number[];
+}
+
+/** Map keyed by String(frame_idx) → entry. Frames absent from the map are
+ *  unreviewed. */
+export type FrameStatesMap = Record<string, FrameStateEntry>;
 
 export interface RunManifest {
   id: string;
@@ -219,6 +236,12 @@ export interface PerTrainTeacherBucket {
   positive: number;
   uncertain: number;
   true_negative: number;
+  /** Phase 3 review-source counters per teacher. All defaulted to 0 by the
+   *  server so old stats.json files keep loading. */
+  n_frames_curated?: number;
+  n_frames_confirmed_empty?: number;
+  n_frames_marked_missed?: number;
+  n_frames_unreviewed_used?: number;
 }
 
 export interface StudentStats {
@@ -243,6 +266,12 @@ export interface StudentStats {
   imgsz: number;
   device: string;
   inference_warmup_discarded: boolean;
+  /** Phase 3 review-source counters: same training-frame total as
+   *  positive+uncertain+true_negative, sliced by what drove each frame. */
+  n_frames_curated?: number;
+  n_frames_confirmed_empty?: number;
+  n_frames_marked_missed?: number;
+  n_frames_unreviewed_used?: number;
 }
 
 export interface StudentDetail {

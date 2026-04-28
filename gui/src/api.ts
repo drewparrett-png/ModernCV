@@ -1,6 +1,9 @@
 import type {
   ArchitecturesResponse,
   BlocksResponse,
+  FrameState,
+  FrameStateEntry,
+  FrameStatesMap,
   GraphSpec,
   LearnRequest,
   OptimizeRequest,
@@ -183,66 +186,64 @@ export function runOverlayUrl(projectId: string, id: string): string {
   return `${p(projectId)}/runs/${encodeURIComponent(id)}/overlay.mp4`;
 }
 
-// ---- Rejections / Approve / Delete -------------------------------------
+// ---- Per-frame review state (Phase 3) -----------------------------------
 
-export type RejectionMap = Record<string, number[]>;
-
-export async function fetchRejections(
+export async function fetchFrameStates(
   projectId: string,
   id: string,
-): Promise<RejectionMap> {
+): Promise<FrameStatesMap> {
   const res = await fetch(
-    `${p(projectId)}/runs/${encodeURIComponent(id)}/rejections`,
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/frame_states`,
   );
-  if (!res.ok) throw new Error(`GET .../rejections: ${res.status}`);
-  const body = (await res.json()) as { rejections: RejectionMap };
-  return body.rejections;
+  if (!res.ok) throw new Error(`GET .../frame_states: ${res.status}`);
+  const body = (await res.json()) as { frame_states: FrameStatesMap };
+  return body.frame_states;
 }
 
-export async function toggleRejection(
+export async function putFrameState(
   projectId: string,
   id: string,
   frame_idx: number,
-  det_idx: number,
-): Promise<RejectionMap> {
+  body: { state: FrameState; rejected_dets?: number[] },
+): Promise<FrameStateEntry> {
   const res = await fetch(
-    `${p(projectId)}/runs/${encodeURIComponent(id)}/rejections/toggle`,
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/frame_states/${frame_idx}`,
     {
-      method: "POST",
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ frame_idx, det_idx }),
+      body: JSON.stringify(body),
     },
   );
-  if (!res.ok) throw new Error(`POST .../toggle: ${res.status}`);
-  const body = (await res.json()) as { rejections: RejectionMap };
-  return body.rejections;
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const err = await res.json();
+      detail = err.detail ?? "";
+    } catch {
+      // ignore — fall through to plain status code
+    }
+    throw new Error(
+      `PUT .../frame_states/${frame_idx}: ${res.status}${detail ? ` (${detail})` : ""}`,
+    );
+  }
+  return (await res.json()) as FrameStateEntry;
 }
 
-export async function approveRun(
+export async function deleteFrameState(
   projectId: string,
   id: string,
-): Promise<RunDetail["manifest"]> {
+  frame_idx: number,
+): Promise<void> {
   const res = await fetch(
-    `${p(projectId)}/runs/${encodeURIComponent(id)}/approve`,
-    { method: "POST" },
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/frame_states/${frame_idx}`,
+    { method: "DELETE" },
   );
-  if (!res.ok) throw new Error(`POST .../approve: ${res.status}`);
-  const body = await res.json();
-  return body.manifest;
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`DELETE .../frame_states/${frame_idx}: ${res.status}`);
+  }
 }
 
-export async function unapproveRun(
-  projectId: string,
-  id: string,
-): Promise<RunDetail["manifest"]> {
-  const res = await fetch(
-    `${p(projectId)}/runs/${encodeURIComponent(id)}/unapprove`,
-    { method: "POST" },
-  );
-  if (!res.ok) throw new Error(`POST .../unapprove: ${res.status}`);
-  const body = await res.json();
-  return body.manifest;
-}
+// ---- Delete a run -------------------------------------------------------
 
 export async function deleteRun(projectId: string, id: string): Promise<void> {
   const res = await fetch(`${p(projectId)}/runs/${encodeURIComponent(id)}`, {
