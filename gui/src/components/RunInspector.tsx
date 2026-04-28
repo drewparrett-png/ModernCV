@@ -38,6 +38,7 @@ import {
   putFrameState,
   runFrameUrl,
 } from "../api";
+import { CropReview } from "./CropReview";
 import type {
   FrameState,
   FrameStatesMap,
@@ -151,6 +152,9 @@ export function RunInspector() {
   // when the run loads; the slider drives it live (client-side filter)
   // and a debounced effect PATCHes it back to the backend.
   const [threshold, setThreshold] = useState<number>(0.3);
+  // Phase 4: Crop-flip review opens as a separate full-screen overlay.
+  // Same projectId/runId, fresh detection list — closes back into us.
+  const [cropMode, setCropMode] = useState(false);
 
   useEffect(() => {
     if (!runId || !projectId) return;
@@ -333,6 +337,30 @@ export function RunInspector() {
 
   if (!runId) return null;
 
+  // When Crop review closes, the user has likely flipped frame states —
+  // refetch so the inspector's pills, kept-count, and review_status match.
+  if (cropMode) {
+    return (
+      <CropReview
+        onClose={() => {
+          setCropMode(false);
+          if (projectId && runId) {
+            fetchFrameStates(projectId, runId)
+              .then((fs) => setFrameStates(fs))
+              .catch(() => {
+                /* keep stale local state — non-fatal */
+              });
+            fetchRunDetail(projectId, runId)
+              .then((d) => setDetail(d))
+              .catch(() => {
+                /* non-fatal */
+              });
+          }
+        }}
+      />
+    );
+  }
+
   const totalFrames = detail?.stats?.frames_processed ?? labels?.length ?? 0;
   const maxIdx = Math.max(0, totalFrames - 1);
   const currentLabels = labelByFrame.get(frameIdx);
@@ -405,6 +433,14 @@ export function RunInspector() {
               title="Reset zoom"
             >
               Reset zoom
+            </button>
+            <button
+              type="button"
+              className="zoom-reset"
+              onClick={() => setCropMode(true)}
+              title="Walk every detection lowest-score-first with keyboard accept/reject"
+            >
+              Crop review →
             </button>
             <button type="button" className="close-button" onClick={close}>
               Close

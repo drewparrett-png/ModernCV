@@ -2557,3 +2557,130 @@ html, body, #root {
   background: #9ca3af;
   cursor: not-allowed;
 }
+
+/* ---- Crop review (Phase 4) -------------------------------------------- */
+
+.crop-review-pos {
+  font-size: 12px;
+  color: #6b7280;
+  min-width: 160px;
+  text-align: right;
+}
+
+.crop-review-body {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  padding: 16px 20px;
+}
+
+.crop-review-main {
+  position: relative;
+  background: #0f172a;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.crop-review-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.crop-review-verdict {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.verdict-accepted {
+  background: rgba(16, 185, 129, 0.9);
+  color: white;
+}
+
+.verdict-rejected {
+  background: rgba(220, 38, 38, 0.9);
+  color: white;
+}
+
+.crop-review-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.crop-review-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #f9fafb;
+}
+
+.crop-review-meta-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.crop-review-meta-label {
+  color: #6b7280;
+}
+
+.crop-review-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.crop-review-thumb-img {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+}
+
+.crop-review-thumb-caption {
+  font-size: 11px;
+  color: #6b7280;
+  text-align: center;
+}
+
+.crop-review-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.crop-review-actions button {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.crop-review-actions button:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.crop-review-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

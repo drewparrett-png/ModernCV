@@ -24,6 +24,8 @@ Endpoints:
     GET  /projects/{pid}/runs/{rid}/frame_states
     PUT  /projects/{pid}/runs/{rid}/frame_states/{frame_idx}
     DELETE /projects/{pid}/runs/{rid}/frame_states/{frame_idx}
+    GET  /projects/{pid}/runs/{rid}/detections           — flat list, score_asc
+    GET  /projects/{pid}/runs/{rid}/detection_crop/{fi}/{di}.jpg
     DELETE /projects/{pid}/runs/{rid}
 
     POST /projects/{pid}/optimize                 — kick a Student run
@@ -65,6 +67,8 @@ from server.schemas import (
     BlocksResponse,
     CacheStatusModel,
     CacheStatusResponse,
+    DetectionRowModel,
+    DetectionsResponse,
     FrameStateEntry,
     FrameStatesResponse,
     LearnRequest,
@@ -482,6 +486,137 @@ def delete_frame_state(project_id: str, run_id: str, frame_idx: int) -> Response
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     runs_mod.unset_frame_state(rdir, frame_idx)
     return Response(status_code=204)
+
+
+@app.get(
+    "/projects/{project_id}/runs/{run_id}/detections",
+    response_model=DetectionsResponse,
+)
+def list_detections(
+    project_id: str,
+    run_id: str,
+    sort: str = Query("score_asc", pattern="^score_asc$"),
+    limit: Optional[int] = Query(None, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
+) -> DetectionsResponse:
+    """Run-level flat list of detections for crop-flip review.
+
+    Default sort is `score_asc` — lowest-confidence first, the order the
+    user most wants to walk because borderline boxes are where curation
+    pays off. Pagination is optional; for a few hundred detections the GUI
+    is happy to hold the full list and the `total` field doubles as the
+    "n / N" position indicator.
+    """
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+
+    rows = runs_mod.iter_detection_rows(rdir)
+    if sort == "score_asc":
+        # Stable secondary key keeps the order deterministic for tied
+        # scores (a 0.05 floor produces lots of 0.05 detections).
+        rows.sort(key=lambda r: (r.score, r.frame_idx, r.det_idx))
+
+    total = len(rows)
+    end = offset + limit if limit is not None else total
+    page = rows[offset:end]
+    return DetectionsResponse(
+        detections=[DetectionRowModel(**r.__dict__) for r in page],
+        total=total,
+    )
+
+
+@app.get("/projects/{project_id}/runs/{run_id}/detection_crop/{frame_idx}/{det_idx}.jpg")
+def detection_crop(
+    project_id: str,
+    run_id: str,
+    frame_idx: int,
+    det_idx: int,
+    pad: int = Query(24, ge=0, le=512),
+) -> Response:
+    """Cropped JPEG of a single detection, with the box outlined.
+
+    The crop is cached on disk under `<run>/crops/<fi>_<di>_p<pad>.jpg`;
+    `pad` is in the filename so the slider effectively cache-busts. Crops
+    are derived from the *raw* video (the manifest's `video_path`) so the
+    overlay's drawn boxes don't double-render with our outline.
+    """
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+
+    cache_path = runs_mod.detection_crop_path(rdir, frame_idx, det_idx, pad)
+    if cache_path.exists():
+        return Response(content=cache_path.read_bytes(), media_type="image/jpeg")
+
+    bbox = runs_mod.detection_bbox_xyxy(rdir, frame_idx, det_idx)
+    if bbox is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no detection at frame={frame_idx} det={det_idx}",
+        )
+
+    manifest = runs_mod.read_manifest(rdir)
+    video_path = manifest.video_path
+    if not Path(video_path).exists():
+        raise HTTPException(status_code=404, detail=f"video not found: {video_path}")
+
+    cap = cv2.VideoCapture(video_path)
+    try:
+        if not cap.isOpened():
+            raise HTTPException(status_code=500, detail=f"cannot open {video_path}")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise HTTPException(
+                status_code=404, detail=f"frame {frame_idx} unavailable"
+            )
+    finally:
+        cap.release()
+
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    # Clip the box itself first (bad coords = misordered or beyond frame),
+    # then the padded crop window. Outline coords are in *crop space*.
+    bx1 = max(0, min(int(round(x1)), w - 1))
+    by1 = max(0, min(int(round(y1)), h - 1))
+    bx2 = max(0, min(int(round(x2)), w - 1))
+    by2 = max(0, min(int(round(y2)), h - 1))
+    if bx2 <= bx1 or by2 <= by1:
+        raise HTTPException(status_code=422, detail="degenerate bbox")
+
+    cx1 = max(0, bx1 - pad)
+    cy1 = max(0, by1 - pad)
+    cx2 = min(w, bx2 + pad)
+    cy2 = min(h, by2 + pad)
+    crop = frame[cy1:cy2, cx1:cx2].copy()
+
+    # Outline relative to crop origin. Use a 2px green box for the same
+    # reason the overlay does — visible on most natural backgrounds.
+    cv2.rectangle(
+        crop,
+        (bx1 - cx1, by1 - cy1),
+        (bx2 - cx1, by2 - cy1),
+        (0, 255, 0),
+        2,
+    )
+
+    ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise HTTPException(status_code=500, detail="jpeg encode failed")
+    data = bytes(buf)
+
+    # Persist cache on first hit. Best-effort: a write failure (full disk,
+    # permissions) shouldn't fail the request.
+    try:
+        runs_mod.crops_dir(rdir).mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(data)
+    except OSError as e:
+        log.warning("failed to cache crop %s: %s", cache_path, e)
+
+    return Response(content=data, media_type="image/jpeg")
 
 
 @app.delete("/projects/{project_id}/runs/{run_id}")
