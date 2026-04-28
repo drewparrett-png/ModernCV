@@ -119,6 +119,20 @@ interface State {
   startOptimize: (req: OptimizeRequest) => Promise<string | null>;
   deleteStudent: (id: string) => Promise<void>;
 
+  // Optimize-mode tab routing (Phase 3). Compare is a sub-tab inside
+  // Optimize, *not* a top-level mode — keeps the existing Learn/Optimize
+  // shell untouched.
+  optimizeTab: "new" | "compare";
+  setOptimizeTab: (t: "new" | "compare") => void;
+  /** Set of Student ids selected in the Compare tab. Lives in the store
+   *  (not local state) so opening the Compare tab on a fresh mount
+   *  doesn't blow away the user's selection while toggling between New
+   *  and Compare sub-tabs. Spec: "persist nothing" — this resets on
+   *  reload because Zustand state is in-memory only. */
+  compareStudentIds: string[];
+  toggleCompareStudent: (id: string) => void;
+  clearCompareStudents: () => void;
+
   // Inspector — which run is currently being inspected (from Learn or Optimize)
   inspectingRunId: string | null;
   openInspector: (id: string) => void;
@@ -445,6 +459,20 @@ export const useStore = create<State>((set, get) => ({
     }
     await get().loadStudents();
   },
+
+  // ---- Optimize tabs (Phase 3) ----
+  optimizeTab: "new",
+  setOptimizeTab: (t) => set({ optimizeTab: t }),
+  compareStudentIds: [],
+  toggleCompareStudent: (id) => {
+    const ids = get().compareStudentIds;
+    if (ids.includes(id)) {
+      set({ compareStudentIds: ids.filter((x) => x !== id) });
+    } else {
+      set({ compareStudentIds: [...ids, id] });
+    }
+  },
+  clearCompareStudents: () => set({ compareStudentIds: [] }),
 
   // ---- Inspector ----
   inspectingRunId: null,
