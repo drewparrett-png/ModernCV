@@ -448,6 +448,9 @@ def optimize_endpoint(req: OptimizeRequest) -> StudentDetail:
             segment_impl=req.segment_impl,
             track_impl=req.track_impl,
             epochs=req.epochs,
+            t_high=req.t_high,
+            t_low=req.t_low,
+            treat_empty_as_negative=req.treat_empty_as_negative,
         )
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))

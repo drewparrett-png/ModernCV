@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 class NodeSpecModel(BaseModel):
@@ -198,6 +198,12 @@ class OptimizeRequest(BaseModel):
     evaluation — the Student is scored against their labels but never sees
     them at train time. May overlap with the train set (in-distribution
     sanity check); the GUI warns when it does.
+
+    Confidence-band fields (`t_high`, `t_low`, `treat_empty_as_negative`)
+    drive the frame-bucket filter in `pipeline.distill.prepare_yolo_dataset`.
+    See `docs/student-training.md` Phase 0 for the full motivation; the
+    short version is "drop frames the teacher was unsure about so we don't
+    train the Student to suppress detections it should be making".
     """
 
     train_teacher_ids: list[str] = Field(default_factory=list)
@@ -206,6 +212,19 @@ class OptimizeRequest(BaseModel):
     segment_impl: Optional[str] = None
     track_impl: Optional[str] = None
     epochs: int = 50
+    # Confidence bands. Defaults match the spec (`docs/student-training.md`).
+    t_high: float = 0.35
+    t_low: float = 0.15
+    treat_empty_as_negative: bool = False
+
+    @model_validator(mode="after")
+    def _t_low_le_t_high(self) -> "OptimizeRequest":
+        if self.t_low > self.t_high:
+            raise ValueError(
+                f"t_low ({self.t_low}) must be <= t_high ({self.t_high}) — "
+                "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+            )
+        return self
 
 
 class StudentManifestModel(BaseModel):
@@ -219,6 +238,12 @@ class StudentManifestModel(BaseModel):
     status: str
     models: dict[str, str] = Field(default_factory=dict)
     error: Optional[str] = None
+    # Confidence-band thresholds for the bucketing pass — persisted on the
+    # manifest so a Student is reproducible from manifest.json alone.
+    # Defaulted so old manifest.json files without these keys still load.
+    t_high: float = 0.35
+    t_low: float = 0.15
+    treat_empty_as_negative: bool = False
 
 
 class PerEvalTeacherStat(BaseModel):
@@ -229,6 +254,22 @@ class PerEvalTeacherStat(BaseModel):
     n_annotations: int = 0
     map50: float = 0.0
     map50_95: float = 0.0
+    # Set when the trainer skipped this teacher (missing source video, etc.).
+    error: Optional[str] = None
+
+
+class PerTrainTeacherBucket(BaseModel):
+    """One row of the Student's per-train-teacher frame-bucket breakdown.
+
+    Mirrors the dict shape produced by `pipeline.distill.prepare_yolo_dataset`
+    so old `stats.json` files (pre-Phase-0.6) that stored this as a plain
+    dict still round-trip without migration.
+    """
+
+    teacher_id: str
+    positive: int = 0
+    uncertain: int = 0
+    true_negative: int = 0
 
 
 class StudentStatsModel(BaseModel):
@@ -244,6 +285,17 @@ class StudentStatsModel(BaseModel):
     p95_inference_ms: float = 0.0
     model_size_mb: float = 0.0
     per_eval_teacher: list[PerEvalTeacherStat] = Field(default_factory=list)
+    # ---- frame-bucket breakdown (Phase 0.5/0.6) --------------------------
+    # All defaulted so old stats.json files without these keys still load.
+    n_positive_frames: int = 0
+    n_uncertain_dropped: int = 0
+    n_true_negative_frames: int = 0
+    per_teacher_buckets: list[PerTrainTeacherBucket] = Field(default_factory=list)
+    # Stamp the thresholds used by the trainer so the detail card shows
+    # "buckets at t_high=0.35" without re-reading the manifest.
+    t_high: float = 0.35
+    t_low: float = 0.15
+    treat_empty_as_negative: bool = False
 
 
 class StudentDetail(BaseModel):
@@ -254,6 +306,53 @@ class StudentDetail(BaseModel):
 
 class StudentsResponse(BaseModel):
     students: list[StudentManifestModel]
+
+
+# ---- Preview-buckets endpoint ---------------------------------------------
+
+
+class PreviewBucketsRequest(BaseModel):
+    """Live-preview request for the New Student form (Phase 0.4).
+
+    Same threshold semantics as `OptimizeRequest` — running the same
+    classification pass that `prepare_yolo_dataset` uses, but without
+    extracting any frames so it's cheap enough to run on every keystroke
+    in the GUI.
+    """
+
+    teacher_ids: list[str] = Field(default_factory=list)
+    t_high: float = 0.35
+    t_low: float = 0.15
+    treat_empty_as_negative: bool = False
+
+    @model_validator(mode="after")
+    def _t_low_le_t_high(self) -> "PreviewBucketsRequest":
+        if self.t_low > self.t_high:
+            raise ValueError(
+                f"t_low ({self.t_low}) must be <= t_high ({self.t_high}) — "
+                "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+            )
+        return self
+
+
+class PreviewBucketsAggregate(BaseModel):
+    positive: int = 0
+    uncertain: int = 0
+    true_negative: int = 0
+    n_classes: int = 0
+    class_names: list[str] = Field(default_factory=list)
+
+
+class PreviewBucketsPerTeacher(BaseModel):
+    teacher_id: str
+    positive: int = 0
+    uncertain: int = 0
+    true_negative: int = 0
+
+
+class PreviewBucketsResponse(BaseModel):
+    aggregate: PreviewBucketsAggregate
+    per_teacher: list[PreviewBucketsPerTeacher] = Field(default_factory=list)
 
 
 # ---- Model cache status ----------------------------------------------------
