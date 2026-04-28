@@ -1833,3 +1833,352 @@ html, body, #root {
 .learn-hint-warn {
   color: #92400e;
 }
+
+/* ---- Optimize sub-tabs (Phase 3) --------------------------------------- */
+
+.optimize-tab-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.optimize-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px 0;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.optimize-tab {
+  padding: 8px 14px;
+  border: 1px solid #e5e7eb;
+  border-bottom: none;
+  background: #f3f4f6;
+  border-radius: 6px 6px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  cursor: pointer;
+}
+
+.optimize-tab:hover:not(:disabled) {
+  background: #fff;
+}
+
+.optimize-tab.active {
+  background: #fff;
+  border-color: #d1d5db;
+  color: #111827;
+  box-shadow: 0 1px 0 0 #fff;
+  position: relative;
+  top: 1px;
+}
+
+.optimize-tab.locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.optimize-tab-hint {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+/* ---- Compare tab ------------------------------------------------------- */
+
+.compare-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.compare-empty {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.compare-empty-inline {
+  padding: 12px;
+  text-align: center;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.compare-selector {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.compare-selector-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.compare-selector-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.compare-selector-count {
+  color: #6b7280;
+  font-size: 12px;
+}
+.compare-clear-btn {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.compare-clear-btn:hover {
+  background: #f3f4f6;
+}
+.compare-selector-empty {
+  color: #6b7280;
+  padding: 8px 0;
+  font-style: italic;
+  font-size: 13px;
+}
+
+.compare-selector-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.compare-selector-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  border: 1px solid #f3f4f6;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.compare-selector-row:hover {
+  background: #f9fafb;
+}
+.compare-selector-row.checked {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.compare-selector-prompt {
+  font-size: 13px;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-selector-arch,
+.compare-selector-map {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.compare-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compare-section {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.compare-section h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.compare-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.compare-section-head h3 {
+  margin: 0;
+}
+
+.compare-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #374151;
+  cursor: pointer;
+}
+
+.compare-table-wrap {
+  overflow-x: auto;
+}
+
+.compare-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.compare-table th,
+.compare-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f3f4f6;
+  white-space: nowrap;
+}
+
+.compare-table th {
+  font-weight: 600;
+  color: #374151;
+  background: #f9fafb;
+  position: sticky;
+  top: 0;
+}
+
+.compare-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.compare-table th.sortable:hover {
+  background: #f3f4f6;
+}
+
+.compare-sort-indicator {
+  display: inline-block;
+  width: 12px;
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.compare-td-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare-best {
+  background: #dcfce7 !important;
+  color: #166534;
+  font-weight: 600;
+}
+
+.compare-matrix-table th:first-child,
+.compare-matrix-table td:first-child {
+  position: sticky;
+  left: 0;
+  background: #fff;
+  z-index: 1;
+}
+.compare-matrix-table thead th:first-child {
+  background: #f9fafb;
+  z-index: 2;
+}
+
+.compare-cell-missing {
+  text-align: center;
+  color: #9ca3af;
+  background-image: repeating-linear-gradient(
+    45deg,
+    #f3f4f6,
+    #f3f4f6 4px,
+    #fff 4px,
+    #fff 8px
+  );
+  cursor: help;
+}
+
+.compare-matrix-table td.map-good { background: #dcfce7; color: #166534; }
+.compare-matrix-table td.map-okay { background: #fef3c7; color: #92400e; }
+.compare-matrix-table td.map-poor { background: #fee2e2; color: #991b1b; }
+
+.compare-badges {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.compare-badge {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  font-size: 12.5px;
+}
+
+.compare-badge-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.compare-pareto-blurb {
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.compare-pareto-wrap {
+  width: 100%;
+  height: 360px;
+}
+
+.compare-pareto-tooltip {
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.08);
+  min-width: 220px;
+}
+
+.compare-pareto-tooltip-header {
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 2px;
+}
+.compare-pareto-tooltip-arch {
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
+
+.compare-pareto-tooltip table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.compare-pareto-tooltip td {
+  padding: 2px 6px 2px 0;
+  vertical-align: top;
+}
+.compare-pareto-tooltip td:last-child {
+  text-align: right;
+}

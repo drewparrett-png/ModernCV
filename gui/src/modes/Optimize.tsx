@@ -34,6 +34,7 @@ import type {
   StudentDetail,
   Task,
 } from "../types";
+import { Compare } from "./Compare";
 
 // Confidence-band defaults — keep in lockstep with `OptimizeRequest`'s
 // backend defaults (`server/schemas.py`) so the form's initial submission
@@ -77,6 +78,8 @@ export function Optimize() {
   const blocks = useStore((s) => s.blocks);
   const openInspector = useStore((s) => s.openInspector);
   const loadStudents = useStore((s) => s.loadStudents);
+  const optimizeTab = useStore((s) => s.optimizeTab);
+  const setOptimizeTab = useStore((s) => s.setOptimizeTab);
 
   // Refresh on tab open — covers the case where another browser tab launched
   // a student.
@@ -103,46 +106,95 @@ export function Optimize() {
     return arr;
   }, [studentDetails]);
 
+  // Compare tab is gated on having ≥2 *completed* students. Showing it
+  // earlier produces a useless empty Compare panel — better to lock the
+  // tab and hint the user.
+  const completedCount = useMemo(
+    () => students.filter((d) => d.manifest.status === "completed").length,
+    [students],
+  );
+  const compareLocked = completedCount < 2;
+
   const selected = selectedId ? studentDetails[selectedId] : null;
 
   return (
-    <div className="optimize-mode-multi">
-      <aside className="students-sidebar">
-        <header className="sidebar-header">
-          <h2>Students</h2>
-          <span className="sidebar-count">{students.length}</span>
-        </header>
-        {students.length === 0 && (
-          <div className="sidebar-empty">No Students yet — start one →</div>
-        )}
-        <ul className="teachers-list">
-          {students.map((d) => (
-            <li
-              key={d.manifest.id}
-              className={`teacher-row ${selectedId === d.manifest.id ? "active" : ""}`}
-              onClick={() => select(d.manifest.id)}
-            >
-              <StudentRow detail={d} onDelete={() => del(d.manifest.id)} />
-            </li>
-          ))}
-        </ul>
-      </aside>
+    <div className="optimize-tab-shell">
+      <nav className="optimize-tabs">
+        <button
+          type="button"
+          className={`optimize-tab ${optimizeTab === "new" ? "active" : ""}`}
+          onClick={() => setOptimizeTab("new")}
+        >
+          New / Inspect
+        </button>
+        <button
+          type="button"
+          className={`optimize-tab ${optimizeTab === "compare" ? "active" : ""} ${
+            compareLocked ? "locked" : ""
+          }`}
+          onClick={() => !compareLocked && setOptimizeTab("compare")}
+          disabled={compareLocked}
+          title={
+            compareLocked
+              ? "Compare needs at least 2 completed Students"
+              : "Compare 2+ completed Students side-by-side"
+          }
+        >
+          Compare
+          {compareLocked && (
+            <span className="optimize-tab-hint">— need ≥ 2 completed</span>
+          )}
+        </button>
+      </nav>
 
-      <main className="learn-main">
-        <NewStudentForm
-          teachers={completedTeachers}
-          blocks={blocks}
-          error={error}
-          onStart={start}
+      {optimizeTab === "new" && (
+        <div className="optimize-mode-multi">
+          <aside className="students-sidebar">
+            <header className="sidebar-header">
+              <h2>Students</h2>
+              <span className="sidebar-count">{students.length}</span>
+            </header>
+            {students.length === 0 && (
+              <div className="sidebar-empty">No Students yet — start one →</div>
+            )}
+            <ul className="teachers-list">
+              {students.map((d) => (
+                <li
+                  key={d.manifest.id}
+                  className={`teacher-row ${selectedId === d.manifest.id ? "active" : ""}`}
+                  onClick={() => select(d.manifest.id)}
+                >
+                  <StudentRow detail={d} onDelete={() => del(d.manifest.id)} />
+                </li>
+              ))}
+            </ul>
+          </aside>
+
+          <main className="learn-main">
+            <NewStudentForm
+              teachers={completedTeachers}
+              blocks={blocks}
+              error={error}
+              onStart={start}
+            />
+            {selected && (
+              <SelectedStudent
+                detail={selected}
+                teacherDetails={teacherDetails}
+                onInspectTeacher={(tid) => openInspector(tid)}
+              />
+            )}
+          </main>
+        </div>
+      )}
+
+      {optimizeTab === "compare" && !compareLocked && (
+        <Compare
+          studentDetails={studentDetails}
+          teacherDetails={teacherDetails}
+          onInspectTeacher={(tid) => openInspector(tid)}
         />
-        {selected && (
-          <SelectedStudent
-            detail={selected}
-            teacherDetails={teacherDetails}
-            onInspectTeacher={(tid) => openInspector(tid)}
-          />
-        )}
-      </main>
+      )}
     </div>
   );
 }
