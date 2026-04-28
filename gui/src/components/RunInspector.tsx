@@ -30,15 +30,20 @@ import {
 } from "react";
 import { useStore } from "../store";
 import {
-  fetchRejections,
+  deleteFrameState,
+  fetchFrameStates,
   fetchRunDetail,
   fetchRunLabels,
   patchRunDisplayThreshold,
+  putFrameState,
   runFrameUrl,
-  toggleRejection as apiToggleRejection,
-  type RejectionMap,
 } from "../api";
-import type { PerFrameLabels, RunDetail } from "../types";
+import type {
+  FrameState,
+  FrameStatesMap,
+  PerFrameLabels,
+  RunDetail,
+} from "../types";
 
 interface Layout {
   /** Top-left of the *rendered image* inside its element box. */
@@ -132,7 +137,10 @@ export function RunInspector() {
 
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [labels, setLabels] = useState<PerFrameLabels[] | null>(null);
-  const [rejections, setRejections] = useState<RejectionMap>({});
+  // Phase 3: per-frame review state replaces the old rejection map. The
+  // canonical store; `rejected_dets` for the current frame is derived
+  // from this on every render.
+  const [frameStates, setFrameStates] = useState<FrameStatesMap>({});
   const [error, setError] = useState<string | null>(null);
   const [frameIdx, setFrameIdx] = useState(0);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
@@ -149,7 +157,7 @@ export function RunInspector() {
     setError(null);
     setDetail(null);
     setLabels(null);
-    setRejections({});
+    setFrameStates({});
     setFrameIdx(0);
     setHoveredIdx(null);
     setView(IDENTITY_VIEW);
@@ -157,12 +165,12 @@ export function RunInspector() {
     Promise.all([
       fetchRunDetail(projectId, runId),
       fetchRunLabels(projectId, runId),
-      fetchRejections(projectId, runId),
+      fetchFrameStates(projectId, runId),
     ])
-      .then(([d, l, r]) => {
+      .then(([d, l, fs]) => {
         setDetail(d);
         setLabels(l);
-        setRejections(r);
+        setFrameStates(fs);
         setThreshold(d.manifest.display_threshold);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -203,15 +211,17 @@ export function RunInspector() {
     return m;
   }, [labels]);
 
-  // Counts respect both the rejection state and the live threshold —
-  // matches what the canvas + label panel actually paint, so the header
-  // tally never disagrees with the visible boxes.
+  // Counts respect both the user's rejected_dets (only meaningful when the
+  // frame's state is "curated") and the live threshold — matches what the
+  // canvas + label panel actually paint, so the header tally never
+  // disagrees with the visible boxes.
   const kept_total = useMemo(() => {
     if (!labels) return [0, 0] as const;
     let total = 0;
     let kept = 0;
     for (const l of labels) {
-      const dropped = new Set(rejections[String(l.frame_idx)] ?? []);
+      const entry = frameStates[String(l.frame_idx)];
+      const dropped = new Set(entry?.rejected_dets ?? []);
       l.detections.forEach((d, i) => {
         if (d.score < threshold) return;
         total += 1;
@@ -219,39 +229,106 @@ export function RunInspector() {
       });
     }
     return [kept, total] as const;
-  }, [labels, rejections, threshold]);
+  }, [labels, frameStates, threshold]);
 
   const handleToggle = useCallback(
     async (detIdx: number) => {
       if (!runId || !projectId) return;
-      setRejections((prev) => {
-        const key = String(frameIdx);
-        const cur = new Set(prev[key] ?? []);
-        if (cur.has(detIdx)) cur.delete(detIdx);
-        else cur.add(detIdx);
-        const next = { ...prev };
-        if (cur.size === 0) delete next[key];
-        else next[key] = [...cur].sort((a, b) => a - b);
-        return next;
-      });
+      // Per-detection toggle always sets the frame's state to "curated"
+      // (Phase 3): the user expressing an opinion on individual dets is
+      // the definition of curation. Re-derive the new rejected_dets list
+      // from the current state, then PUT.
+      const key = String(frameIdx);
+      const cur = new Set(frameStates[key]?.rejected_dets ?? []);
+      if (cur.has(detIdx)) cur.delete(detIdx);
+      else cur.add(detIdx);
+      const nextRejected = [...cur].sort((a, b) => a - b);
+
+      // Optimistic update so the UI feels instant.
+      setFrameStates((prev) => ({
+        ...prev,
+        [key]: { state: "curated", rejected_dets: nextRejected },
+      }));
+
       try {
-        const canonical = await apiToggleRejection(
-          projectId,
-          runId,
-          frameIdx,
-          detIdx,
-        );
-        setRejections(canonical);
+        const updated = await putFrameState(projectId, runId, frameIdx, {
+          state: "curated",
+          rejected_dets: nextRejected,
+        });
+        setFrameStates((prev) => ({ ...prev, [key]: updated }));
+        // Coverage may have flipped → refresh the manifest (review_status
+        // + approved_at). Cheap; one more round-trip, no labels reload.
+        try {
+          const refreshed = await fetchRunDetail(projectId, runId);
+          setDetail(refreshed);
+        } catch {
+          /* non-fatal */
+        }
       } catch (e) {
         console.error("toggle rejection failed", e);
+        // Roll back to canonical server state on failure.
         try {
-          setRejections(await fetchRejections(projectId, runId));
+          setFrameStates(await fetchFrameStates(projectId, runId));
         } catch {
           /* user can retry */
         }
       }
     },
-    [projectId, runId, frameIdx],
+    [projectId, runId, frameIdx, frameStates],
+  );
+
+  const handleSetFrameState = useCallback(
+    async (target: FrameState | null) => {
+      if (!runId || !projectId) return;
+      const key = String(frameIdx);
+      // Optimistic update.
+      setFrameStates((prev) => {
+        const next = { ...prev };
+        if (target === null) {
+          delete next[key];
+        } else {
+          // Switching states clears rejected_dets unless we're staying on
+          // "curated" (which keeps whatever was already there).
+          const prevEntry = prev[key];
+          const keepRejected =
+            target === "curated" && prevEntry?.state === "curated"
+              ? prevEntry.rejected_dets
+              : [];
+          next[key] = { state: target, rejected_dets: keepRejected };
+        }
+        return next;
+      });
+
+      try {
+        if (target === null) {
+          await deleteFrameState(projectId, runId, frameIdx);
+        } else {
+          const body: { state: FrameState; rejected_dets?: number[] } = {
+            state: target,
+          };
+          if (target === "curated") {
+            body.rejected_dets =
+              frameStates[key]?.rejected_dets ?? [];
+          }
+          const updated = await putFrameState(projectId, runId, frameIdx, body);
+          setFrameStates((prev) => ({ ...prev, [key]: updated }));
+        }
+        try {
+          const refreshed = await fetchRunDetail(projectId, runId);
+          setDetail(refreshed);
+        } catch {
+          /* non-fatal */
+        }
+      } catch (e) {
+        console.error("set frame state failed", e);
+        try {
+          setFrameStates(await fetchFrameStates(projectId, runId));
+        } catch {
+          /* user can retry */
+        }
+      }
+    },
+    [projectId, runId, frameIdx, frameStates],
   );
 
   if (!runId) return null;
@@ -259,7 +336,14 @@ export function RunInspector() {
   const totalFrames = detail?.stats?.frames_processed ?? labels?.length ?? 0;
   const maxIdx = Math.max(0, totalFrames - 1);
   const currentLabels = labelByFrame.get(frameIdx);
-  const rejectedHere = new Set(rejections[String(frameIdx)] ?? []);
+  const currentEntry = frameStates[String(frameIdx)];
+  const currentState: FrameState | null = currentEntry?.state ?? null;
+  // rejected_dets is only meaningful for "curated" — for the other two
+  // states, the entry's array is empty by construction. Reading it
+  // unconditionally keeps the canvas red-box rendering trivial.
+  const rejectedHere = new Set(currentEntry?.rejected_dets ?? []);
+  const reviewStatus = detail?.manifest.review_status ?? "unreviewed";
+  const reviewCoverage = Object.keys(frameStates).length;
 
   return (
     <div className="inspector-overlay" role="dialog" aria-modal="true">
@@ -276,6 +360,23 @@ export function RunInspector() {
             {labels && (
               <div className="inspector-keepcount">
                 {kept_total[0]} kept / {kept_total[1]} total detections
+              </div>
+            )}
+            {detail && totalFrames > 0 && (
+              <div className="inspector-review-status mono">
+                {reviewStatus === "approved" && (
+                  <>
+                    Approved
+                    {detail.manifest.approved_at &&
+                      ` · ${detail.manifest.approved_at}`}
+                  </>
+                )}
+                {reviewStatus === "in_progress" && (
+                  <>
+                    In progress · {reviewCoverage} / {totalFrames} frames
+                  </>
+                )}
+                {reviewStatus === "unreviewed" && <>Unreviewed</>}
               </div>
             )}
           </div>
@@ -349,6 +450,11 @@ export function RunInspector() {
                 threshold={threshold}
               />
             </div>
+
+            <FrameStatePills
+              currentState={currentState}
+              onSet={handleSetFrameState}
+            />
 
             <div className="scrubber-row">
               <button
@@ -774,6 +880,69 @@ function LabelPanel({
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+// ---- Per-frame state pills (Phase 3) -------------------------------------
+
+const PILL_DEFS: { state: FrameState; label: string; title: string }[] = [
+  {
+    state: "curated",
+    label: "Curated",
+    title:
+      "Boxes look right (after any per-detection rejections). Train labels = score-filtered detections minus your rejects.",
+  },
+  {
+    state: "confirmed_empty",
+    label: "Confirmed empty",
+    title:
+      "This frame is genuinely empty. Forces a true negative for the Student trainer.",
+  },
+  {
+    state: "marked_missed",
+    label: "Marked missed",
+    title:
+      "The model missed something here — labels can't be trusted. Drops the frame from training entirely.",
+  },
+];
+
+function FrameStatePills({
+  currentState,
+  onSet,
+}: {
+  currentState: FrameState | null;
+  onSet: (target: FrameState | null) => void;
+}) {
+  return (
+    <div className="frame-state-pills" role="radiogroup" aria-label="Frame review state">
+      {PILL_DEFS.map((p) => {
+        const active = currentState === p.state;
+        return (
+          <button
+            key={p.state}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            className={`frame-state-pill ${p.state} ${active ? "active" : ""}`}
+            onClick={() => onSet(active ? null : p.state)}
+            title={p.title}
+          >
+            {p.label}
+          </button>
+        );
+      })}
+      <button
+        key="unreviewed"
+        type="button"
+        role="radio"
+        aria-checked={currentState === null}
+        className={`frame-state-pill unreviewed ${currentState === null ? "active" : ""}`}
+        onClick={() => onSet(null)}
+        title="Clear this frame's review state."
+      >
+        Unreviewed
+      </button>
     </div>
   );
 }

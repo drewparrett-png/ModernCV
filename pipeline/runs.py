@@ -50,7 +50,7 @@ STUDENTS_DIR = "students"
 MANIFEST_NAME = "manifest.json"
 STATS_NAME = "stats.json"
 PROGRESS_NAME = "progress.json"
-REJECTIONS_NAME = "rejections.json"
+FRAME_STATES_NAME = "frame_states.json"
 OVERLAY_NAME = "overlay.mp4"
 LABELS_DIR = "labels"
 COCO_NAME = "coco.json"
@@ -166,10 +166,11 @@ def project_summary_counts(project_id: str, runs_root: Path = RUNS_DIR) -> dict[
                 n_running += 1
             if m.status == "completed":
                 n_teacher += 1
-                # "Human-reviewed" today = approved or any rejection. Phase 3
-                # tightens this to "every frame has a state"; we'll switch
-                # the helper then.
-                if m.approved_at is not None or has_any_rejections(p):
+                # Phase 3: strict bar — only fully-reviewed runs count. A
+                # run is "approved" iff every processed frame has an explicit
+                # per-frame state entry in frame_states.json (in_progress
+                # and unreviewed don't count toward the project total).
+                if derive_review_status(p) == "approved":
                     n_reviewed += 1
 
     sdir = students_dir(project_id, runs_root)
@@ -254,9 +255,12 @@ class RunManifest:
     status: str = "running"  # "running" | "completed" | "failed"
     models: dict[str, str] = field(default_factory=dict)
     error: Optional[str] = None
-    # ISO 8601 UTC timestamp set when the run is marked "Approved as ground
-    # truth" via /runs/{id}/approve. None means not approved (review_status
-    # is then derived from rejection presence). Default None so legacy
+    # ISO 8601 UTC timestamp stamped by `set_frame_state` the moment the
+    # last unreviewed frame flips, and cleared by `unset_frame_state` if
+    # the run drops back below 100% coverage. Phase 3 derives
+    # `review_status` from `frame_states.json` directly; this field is
+    # surfaced to the GUI as "approved at <timestamp>" but is not the
+    # source of truth for the status itself. Default None so legacy
     # manifests load unchanged.
     approved_at: Optional[str] = None
     # Phase 2: post-hoc score filter applied to per_frame.jsonl at read time.
@@ -432,7 +436,9 @@ class StudentStats:
     n_uncertain_dropped: int = 0
     n_true_negative_frames: int = 0
     # One entry per train teacher:
-    # {"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int}
+    # {"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int,
+    #  "n_frames_curated": int, "n_frames_confirmed_empty": int,
+    #  "n_frames_marked_missed": int, "n_frames_unreviewed_used": int}
     per_teacher_buckets: list[dict[str, Any]] = field(default_factory=list)
     # Thresholds the trainer actually used. Stamped on the stats so the
     # detail card can render "frame buckets at export_threshold=0.30,
@@ -440,6 +446,13 @@ class StudentStats:
     export_threshold: float = 0.30
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
+    # ---- Phase 3 review-source counters --------------------------------
+    # All defaulted to 0 so old stats.json files (pre-Phase-3) keep
+    # loading. See server/schemas.py::StudentStatsModel for semantics.
+    n_frames_curated: int = 0
+    n_frames_confirmed_empty: int = 0
+    n_frames_marked_missed: int = 0
+    n_frames_unreviewed_used: int = 0
     # ---- Phase 2.2 comparability fields ---------------------------------
     # Stamped so the Phase 3 compare view can flag mismatches across
     # students. All defaulted so old stats.json files (without these
@@ -594,30 +607,6 @@ def mark_failed(rdir: Path, error: str) -> RunManifest:
     return manifest
 
 
-def approve_run(rdir: Path) -> RunManifest:
-    """Stamp `approved_at` on the manifest. No-op if already approved.
-
-    Caller is responsible for the "must be completed" 400 — this helper
-    trusts its input.
-    """
-    manifest = read_manifest(rdir)
-    if manifest.approved_at is not None:
-        return manifest
-    manifest.approved_at = _now_iso()
-    write_manifest(rdir, manifest)
-    return manifest
-
-
-def unapprove_run(rdir: Path) -> RunManifest:
-    """Clear `approved_at`. No-op if not currently approved."""
-    manifest = read_manifest(rdir)
-    if manifest.approved_at is None:
-        return manifest
-    manifest.approved_at = None
-    write_manifest(rdir, manifest)
-    return manifest
-
-
 def set_display_threshold(rdir: Path, threshold: float) -> RunManifest:
     """Persist a new `display_threshold` on the run's manifest.
 
@@ -630,22 +619,73 @@ def set_display_threshold(rdir: Path, threshold: float) -> RunManifest:
     return manifest
 
 
-def derive_review_status(rdir: Path) -> str:
-    """Three-state human-review summary computed from disk.
+def _count_processed_frames(rdir: Path) -> int:
+    """How many frames did the run actually produce labels for.
 
-    Used by API endpoints to populate `RunManifestModel.review_status`.
-    "approved" if the manifest has `approved_at`; otherwise "reviewed"
-    iff `rejections.json` has any non-empty entry; else "unreviewed".
+    Used by `derive_review_status` to decide whether the user has covered
+    every frame with an explicit state. Source order:
+
+      1. `progress.json::frames_processed` if present (cheapest).
+      2. `stats.json::frames_processed` if present.
+      3. Fallback: count non-blank lines in `per_frame.jsonl`.
+
+    Returns 0 when none of the above are available — `derive_review_status`
+    treats 0 as "no frames yet, nothing to review".
     """
-    try:
-        manifest = read_manifest(rdir)
-    except Exception:
+    progress_path = rdir / PROGRESS_NAME
+    if progress_path.exists():
+        try:
+            raw = json.loads(progress_path.read_text())
+            n = int(raw.get("current_frame", 0))
+            if n > 0:
+                return n
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    stats_path = rdir / STATS_NAME
+    if stats_path.exists():
+        try:
+            raw = json.loads(stats_path.read_text())
+            n = int(raw.get("frames_processed", 0))
+            if n > 0:
+                return n
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    pf_path = rdir / LABELS_DIR / PER_FRAME_NAME
+    if pf_path.exists():
+        n = 0
+        with pf_path.open("r") as fp:
+            for line in fp:
+                if line.strip():
+                    n += 1
+        return n
+
+    return 0
+
+
+def derive_review_status(rdir: Path) -> str:
+    """Three-state human-review summary computed from disk (Phase 3).
+
+    Source of truth is `frame_states.json` together with the run's
+    processed-frame count:
+
+      • "approved"    — every processed frame has a state entry.
+      • "in_progress" — at least one frame has a state, but not all.
+      • "unreviewed"  — no states set (or no frames at all).
+
+    `manifest.approved_at` is a *derived* timestamp stamped by
+    `set_frame_state` when coverage flips to 100% and cleared by
+    `unset_frame_state` when it drops below — it's not consulted here, the
+    file content is.
+    """
+    states = read_frame_states(rdir)
+    if not states:
         return "unreviewed"
-    if manifest.approved_at is not None:
+    n_frames = _count_processed_frames(rdir)
+    if n_frames > 0 and len(states) >= n_frames:
         return "approved"
-    if has_any_rejections(rdir):
-        return "reviewed"
-    return "unreviewed"
+    return "in_progress"
 
 
 # ---- Read / list -----------------------------------------------------------
@@ -1116,109 +1156,193 @@ def read_per_frame(rdir: Path) -> Iterable[dict]:
 # ---- COCO export -----------------------------------------------------------
 
 
-# ---- Rejections (human curation) ------------------------------------------
+# ---- Per-frame review state (human curation) ------------------------------
+
+_VALID_FRAME_STATES = ("curated", "confirmed_empty", "marked_missed")
 
 
-def has_any_rejections(rdir: Path) -> bool:
-    """Cheap "is anything rejected here?" check for `review_status` derivation.
+def _frame_states_path(rdir: Path) -> Path:
+    return rdir / FRAME_STATES_NAME
 
-    Avoids parsing the full rejection map — `review_status` is computed on
-    every /runs listing entry, so a 50-run directory must not pay 50 full
-    JSON parses. Short-circuits on:
 
-      1. File missing → False.
-      2. File present but empty / "{}" → False.
-      3. File parseable as a dict with at least one frame whose value is
-         a non-empty list → True.
+def read_frame_states(rdir: Path) -> dict[int, dict]:
+    """Read per-frame review state.
 
-    Anything malformed (bad JSON, non-dict root) is treated as "no
-    rejections" — same defensive behavior as `read_rejections`.
+    On disk: `{"<frame_idx>": {"state": "...", "rejected_dets": [...]}, …}`
+    (str keys for JSON; `rejected_dets` omitted unless the entry has any).
+    In memory: int keys → entry dict. Missing file or malformed JSON →
+    empty dict.
+
+    Filters out entries with unknown states (defensive — never let a bad
+    on-disk value propagate to distill or the GUI).
     """
-    p = rdir / REJECTIONS_NAME
+    p = _frame_states_path(rdir)
     if not p.exists():
-        return False
+        return {}
     try:
         raw = json.loads(p.read_text())
     except json.JSONDecodeError:
-        return False
+        log.warning("frame_states.json was malformed at %s; treating as empty", p)
+        return {}
     if not isinstance(raw, dict):
-        return False
-    for v in raw.values():
-        if isinstance(v, list) and len(v) > 0:
-            return True
-    return False
-
-
-def read_rejections(rdir: Path) -> dict[int, list[int]]:
-    """Read curated rejections.
-
-    On disk: `{"<frame_idx>": [det_idx, det_idx, …], …}` (str keys for JSON).
-    In memory: int keys, sorted-ish lists. Missing file → empty dict.
-    """
-    p = rdir / REJECTIONS_NAME
-    if not p.exists():
         return {}
-    try:
-        raw = json.loads(p.read_text())
-    except json.JSONDecodeError:
-        log.warning("rejections.json was malformed at %s; treating as empty", p)
-        return {}
-    out: dict[int, list[int]] = {}
+    out: dict[int, dict] = {}
     for k, v in raw.items():
         try:
-            out[int(k)] = sorted({int(x) for x in v})
+            fi = int(k)
         except (TypeError, ValueError):
             continue
+        if not isinstance(v, dict):
+            continue
+        state = v.get("state")
+        if state not in _VALID_FRAME_STATES:
+            continue
+        entry: dict = {"state": state}
+        rejected = v.get("rejected_dets")
+        if state == "curated" and isinstance(rejected, list):
+            try:
+                entry["rejected_dets"] = sorted({int(x) for x in rejected})
+            except (TypeError, ValueError):
+                entry["rejected_dets"] = []
+        else:
+            entry["rejected_dets"] = []
+        out[fi] = entry
     return out
 
 
-def write_rejections(rdir: Path, rejections: dict[int, list[int]]) -> None:
-    """Atomic-ish write — temp file + rename so a polling reader never sees
-    half-written JSON."""
-    serializable = {str(k): sorted(set(int(x) for x in v)) for k, v in rejections.items() if v}
-    tmp = rdir / (REJECTIONS_NAME + ".tmp")
-    tmp.write_text(json.dumps(serializable, indent=2))
-    tmp.replace(rdir / REJECTIONS_NAME)
+def write_frame_states(rdir: Path, states: dict[int, dict]) -> None:
+    """Atomic-ish write of frame_states.json.
 
-
-def toggle_rejection(rdir: Path, frame_idx: int, det_idx: int) -> dict[int, list[int]]:
-    """Flip the rejected state for one detection. Returns the updated map.
-
-    Used by `POST /runs/{id}/rejections/toggle`. Idempotent in the sense that
-    two consecutive toggles return to the original state.
+    Empty `rejected_dets` lists are stripped from the on-disk shape so the
+    file stays compact (`{"5": {"state": "confirmed_empty"}}` vs the
+    longer form). The reader normalizes both shapes.
     """
-    state = read_rejections(rdir)
-    bucket = set(state.get(frame_idx, []))
-    if det_idx in bucket:
-        bucket.discard(det_idx)
-    else:
-        bucket.add(det_idx)
-    if bucket:
-        state[frame_idx] = sorted(bucket)
-    else:
-        state.pop(frame_idx, None)
-    write_rejections(rdir, state)
-    return state
-
-
-def filter_detections_by_rejections(
-    per_frame: Iterable[dict],
-    rejections: dict[int, list[int]],
-) -> Iterable[dict]:
-    """Helper for the eventual Optimize trainer. Yields per-frame records
-    with rejected detection indices removed. Doesn't change schema; just
-    drops elements from `detections` and reindexes nothing — caller should
-    treat detection-position as opaque."""
-    for rec in per_frame:
-        idx = int(rec.get("frame_idx", -1))
-        rejected = set(rejections.get(idx, []))
-        if not rejected:
-            yield rec
+    serializable: dict[str, dict] = {}
+    for fi, entry in states.items():
+        state = entry.get("state")
+        if state not in _VALID_FRAME_STATES:
             continue
-        kept = [d for i, d in enumerate(rec.get("detections", [])) if i not in rejected]
-        new_rec = dict(rec)
-        new_rec["detections"] = kept
-        yield new_rec
+        out_entry: dict = {"state": state}
+        rejected = entry.get("rejected_dets") or []
+        if state == "curated" and rejected:
+            out_entry["rejected_dets"] = sorted({int(x) for x in rejected})
+        serializable[str(int(fi))] = out_entry
+    tmp = rdir / (FRAME_STATES_NAME + ".tmp")
+    tmp.write_text(json.dumps(serializable, indent=2))
+    tmp.replace(_frame_states_path(rdir))
+
+
+def _frame_det_count(rdir: Path, frame_idx: int) -> Optional[int]:
+    """Look up how many detections a frame has, for rejected_dets bounds-checking.
+
+    Returns None if the frame isn't found in `per_frame.jsonl` (caller treats
+    that as "frame doesn't exist" → 404 / ValueError). Streams the file —
+    cheap on small runs, fine on large ones since we short-circuit.
+    """
+    pf_path = rdir / LABELS_DIR / PER_FRAME_NAME
+    if not pf_path.exists():
+        return None
+    with pf_path.open("r") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if int(rec.get("frame_idx", -1)) == frame_idx:
+                return len(rec.get("detections") or [])
+    return None
+
+
+def _stamp_approved_at_if_complete(rdir: Path, states: dict[int, dict]) -> None:
+    """When the user finishes the last frame, write the timestamp.
+
+    Mirrors the inverse op in `unset_frame_state`: as soon as coverage
+    drops below 100%, `approved_at` clears. Together they keep the
+    timestamp in sync with `derive_review_status() == "approved"` without
+    requiring callers to recompute it.
+    """
+    n_frames = _count_processed_frames(rdir)
+    fully_covered = n_frames > 0 and len(states) >= n_frames
+    try:
+        manifest = read_manifest(rdir)
+    except Exception:
+        return
+    if fully_covered and manifest.approved_at is None:
+        manifest.approved_at = _now_iso()
+        write_manifest(rdir, manifest)
+    elif not fully_covered and manifest.approved_at is not None:
+        manifest.approved_at = None
+        write_manifest(rdir, manifest)
+
+
+def set_frame_state(
+    rdir: Path,
+    frame_idx: int,
+    state: str,
+    rejected_dets: Optional[list[int]] = None,
+) -> dict:
+    """Set (or update) the review entry for one frame.
+
+    Validates:
+      • `state` is one of `_VALID_FRAME_STATES`.
+      • `rejected_dets` is only allowed when `state == "curated"`.
+      • Each rejected det index is in range for that frame's per_frame.jsonl
+        entry; raising prevents stale UI state from persisting bogus indices.
+
+    On success, writes frame_states.json and re-stamps `approved_at` on the
+    manifest if the run just hit full coverage. Returns the persisted entry.
+
+    Raises `ValueError` for any validation failure — the API layer maps it
+    to 400.
+    """
+    if state not in _VALID_FRAME_STATES:
+        raise ValueError(f"invalid state {state!r}; expected one of {_VALID_FRAME_STATES}")
+    if state != "curated" and rejected_dets:
+        raise ValueError(
+            f"rejected_dets only allowed with state='curated', not {state!r}"
+        )
+
+    cleaned: list[int] = []
+    if state == "curated" and rejected_dets:
+        det_count = _frame_det_count(rdir, frame_idx)
+        if det_count is None:
+            raise ValueError(f"frame {frame_idx} not found in per_frame.jsonl")
+        for x in rejected_dets:
+            try:
+                idx = int(x)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"invalid det_idx {x!r}: {e}") from e
+            if not (0 <= idx < det_count):
+                raise ValueError(
+                    f"det_idx {idx} out of range for frame {frame_idx} "
+                    f"(has {det_count} detections)"
+                )
+            cleaned.append(idx)
+        cleaned = sorted(set(cleaned))
+
+    entry: dict = {"state": state, "rejected_dets": cleaned}
+    states = read_frame_states(rdir)
+    states[int(frame_idx)] = entry
+    write_frame_states(rdir, states)
+    _stamp_approved_at_if_complete(rdir, states)
+    return entry
+
+
+def unset_frame_state(rdir: Path, frame_idx: int) -> None:
+    """Remove the review entry for one frame.
+
+    No-op if the frame had no entry. Clears `approved_at` if removing the
+    entry takes the run below full coverage.
+    """
+    states = read_frame_states(rdir)
+    if int(frame_idx) not in states:
+        return
+    states.pop(int(frame_idx), None)
+    write_frame_states(rdir, states)
+    _stamp_approved_at_if_complete(rdir, states)
 
 
 # ---- Delete a run ---------------------------------------------------------

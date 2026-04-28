@@ -451,6 +451,12 @@ def _run_distillation(
         export_threshold=export_threshold,
         t_low=t_low,
         treat_empty_as_negative=treat_empty_as_negative,
+        # Phase 3 review-source counters: same training-frame total as
+        # positive+uncertain+true_negative, sliced by what drove each frame.
+        n_frames_curated=summary.n_frames_curated,
+        n_frames_confirmed_empty=summary.n_frames_confirmed_empty,
+        n_frames_marked_missed=summary.n_frames_marked_missed,
+        n_frames_unreviewed_used=summary.n_frames_unreviewed_used,
         # Phase 2.2 comparability fields. `imgsz` mirrors what we passed
         # into `trainer.train()`. `device` is what the trainer actually
         # used (re-evaluating `_pick_device()` here matches the trainer's

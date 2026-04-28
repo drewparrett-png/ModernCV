@@ -21,10 +21,9 @@ Endpoints:
     GET  /projects/{pid}/runs/{rid}/labels        — per_frame.jsonl
     GET  /projects/{pid}/runs/{rid}/frame/{idx}   — JPEG of frame idx
     GET  /projects/{pid}/runs/{rid}/overlay.mp4
-    GET  /projects/{pid}/runs/{rid}/rejections
-    POST /projects/{pid}/runs/{rid}/rejections/toggle
-    POST /projects/{pid}/runs/{rid}/approve
-    POST /projects/{pid}/runs/{rid}/unapprove
+    GET  /projects/{pid}/runs/{rid}/frame_states
+    PUT  /projects/{pid}/runs/{rid}/frame_states/{frame_idx}
+    DELETE /projects/{pid}/runs/{rid}/frame_states/{frame_idx}
     DELETE /projects/{pid}/runs/{rid}
 
     POST /projects/{pid}/optimize                 — kick a Student run
@@ -61,12 +60,13 @@ from pipeline.optimize import run_optimize_in_background
 from pipeline.runner import run as run_graph
 from pipeline.students import list_trainers
 from server.schemas import (
-    ApproveResponse,
     ArchitecturesResponse,
     BlockKindInfo,
     BlocksResponse,
     CacheStatusModel,
     CacheStatusResponse,
+    FrameStateEntry,
+    FrameStatesResponse,
     LearnRequest,
     OptimizeRequest,
     PreviewBucketsAggregate,
@@ -78,8 +78,7 @@ from server.schemas import (
     ProjectPatchRequest,
     ProjectsResponse,
     ProjectSummaryModel,
-    RejectionsResponse,
-    RejectToggleRequest,
+    PutFrameStateRequest,
     RunDetail,
     RunManifestModel,
     RunPatchRequest,
@@ -400,73 +399,89 @@ def run_overlay(project_id: str, run_id: str) -> FileResponse:
 
 
 @app.get(
-    "/projects/{project_id}/runs/{run_id}/rejections",
-    response_model=RejectionsResponse,
+    "/projects/{project_id}/runs/{run_id}/frame_states",
+    response_model=FrameStatesResponse,
 )
-def get_rejections(project_id: str, run_id: str) -> RejectionsResponse:
+def get_frame_states(project_id: str, run_id: str) -> FrameStatesResponse:
+    """Return all per-frame review entries for a run.
+
+    Phase 3 source-of-truth: each frame can carry one of `curated`,
+    `confirmed_empty`, `marked_missed`. Frames absent from the response
+    are unreviewed.
+    """
     _require_project(project_id)
     rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
-    state = runs_mod.read_rejections(rdir)
-    return RejectionsResponse(rejections={str(k): v for k, v in state.items()})
+    raw = runs_mod.read_frame_states(rdir)
+    return FrameStatesResponse(
+        frame_states={
+            str(k): FrameStateEntry(
+                state=v["state"],
+                rejected_dets=v.get("rejected_dets", []),
+            )
+            for k, v in raw.items()
+        }
+    )
 
 
-@app.post(
-    "/projects/{project_id}/runs/{run_id}/rejections/toggle",
-    response_model=RejectionsResponse,
+@app.put(
+    "/projects/{project_id}/runs/{run_id}/frame_states/{frame_idx}",
+    response_model=FrameStateEntry,
 )
-def toggle_rejection(
-    project_id: str, run_id: str, req: RejectToggleRequest
-) -> RejectionsResponse:
+def put_frame_state(
+    project_id: str,
+    run_id: str,
+    frame_idx: int,
+    req: PutFrameStateRequest,
+) -> FrameStateEntry:
+    """Set or update one frame's review state.
+
+    Validation lives in `runs_mod.set_frame_state` and surfaces as 400 on
+    `ValueError` (invalid state, rejected_dets with non-curated state, or
+    out-of-range det index). Side effect: stamps `manifest.approved_at`
+    when this PUT brings the run to full coverage.
+    """
     _require_project(project_id)
     rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
-    state = runs_mod.toggle_rejection(rdir, req.frame_idx, req.det_idx)
-    return RejectionsResponse(rejections={str(k): v for k, v in state.items()})
-
-
-@app.post(
-    "/projects/{project_id}/runs/{run_id}/approve", response_model=ApproveResponse
-)
-def approve_run_endpoint(project_id: str, run_id: str) -> ApproveResponse:
-    _require_project(project_id)
-    rdir = runs_mod.run_dir(project_id, run_id)
-    if not (rdir / runs_mod.MANIFEST_NAME).exists():
-        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
-    manifest = runs_mod.read_manifest(rdir)
-    if manifest.status != "completed":
+    if req.rejected_dets is not None and req.state != "curated":
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"run {run_id!r} status is {manifest.status!r}; only "
-                "completed runs can be approved as ground truth"
-            ),
+            detail="rejected_dets only allowed with state='curated'",
         )
-    updated = runs_mod.approve_run(rdir)
-    return ApproveResponse(manifest=_manifest_to_model(project_id, updated, rdir))
+    try:
+        entry = runs_mod.set_frame_state(
+            rdir,
+            frame_idx,
+            req.state,
+            rejected_dets=req.rejected_dets,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return FrameStateEntry(
+        state=entry["state"],
+        rejected_dets=entry.get("rejected_dets", []),
+    )
 
 
-@app.post(
-    "/projects/{project_id}/runs/{run_id}/unapprove", response_model=ApproveResponse
+@app.delete(
+    "/projects/{project_id}/runs/{run_id}/frame_states/{frame_idx}",
+    status_code=204,
 )
-def unapprove_run_endpoint(project_id: str, run_id: str) -> ApproveResponse:
+def delete_frame_state(project_id: str, run_id: str, frame_idx: int) -> Response:
+    """Unset one frame's review state.
+
+    No-op if the frame had no entry. Clears `approved_at` if removing the
+    entry takes the run below full coverage.
+    """
     _require_project(project_id)
     rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
-    manifest = runs_mod.read_manifest(rdir)
-    if manifest.status != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"run {run_id!r} status is {manifest.status!r}; only "
-                "completed runs can have their approval changed"
-            ),
-        )
-    updated = runs_mod.unapprove_run(rdir)
-    return ApproveResponse(manifest=_manifest_to_model(project_id, updated, rdir))
+    runs_mod.unset_frame_state(rdir, frame_idx)
+    return Response(status_code=204)
 
 
 @app.delete("/projects/{project_id}/runs/{run_id}")
