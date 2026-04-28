@@ -38,8 +38,10 @@ import { Compare } from "./Compare";
 
 // Confidence-band defaults — keep in lockstep with `OptimizeRequest`'s
 // backend defaults (`server/schemas.py`) so the form's initial submission
-// is a no-op against the backend's default behaviour.
-const DEFAULT_T_HIGH = 0.35;
+// is a no-op against the backend's default behaviour. Phase 2 renamed
+// `t_high` → `export_threshold` and dropped the default to 0.30 to match
+// `RunManifest.display_threshold`.
+const DEFAULT_EXPORT_THRESHOLD = 0.3;
 const DEFAULT_T_LOW = 0.15;
 const PREVIEW_DEBOUNCE_MS = 250;
 
@@ -290,7 +292,9 @@ function NewStudentForm({
   // Confidence-band knobs (Phase 0.4). Local string state for the inputs
   // so the user can type a partial value (e.g. "0.") without React
   // immediately snapping it back to a number — we coerce on commit.
-  const [tHigh, setTHigh] = useState<number>(DEFAULT_T_HIGH);
+  const [exportThreshold, setExportThreshold] = useState<number>(
+    DEFAULT_EXPORT_THRESHOLD,
+  );
   const [tLow, setTLow] = useState<number>(DEFAULT_T_LOW);
   const [treatEmptyAsNegative, setTreatEmptyAsNegative] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -302,7 +306,7 @@ function NewStudentForm({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewSeqRef = useRef(0);
 
-  const thresholdsValid = tLow <= tHigh;
+  const thresholdsValid = tLow <= exportThreshold;
 
   // The Student's task is fixed to the first Train teacher's task. The
   // Eval set can technically include any task (warning surfaces below);
@@ -344,7 +348,7 @@ function NewStudentForm({
   // Debounced live preview. Re-fires whenever the train teacher set or the
   // threshold knobs change. We bail early when:
   //   • no Train teachers selected     → preview = null (empty state below)
-  //   • thresholds are invalid (t_low > t_high) → don't waste a 422 round-trip
+  //   • thresholds are invalid (t_low > export_threshold) → don't waste a 422 round-trip
   // The seq guard prevents an in-flight slow response from clobbering a
   // fresher result, which matters once teacher COCOs get large.
   useEffect(() => {
@@ -364,7 +368,7 @@ function NewStudentForm({
     const handle = setTimeout(() => {
       previewBuckets(projectId, {
         teacher_ids: trainIds,
-        t_high: tHigh,
+        export_threshold: exportThreshold,
         t_low: tLow,
         treat_empty_as_negative: treatEmptyAsNegative,
       })
@@ -382,7 +386,7 @@ function NewStudentForm({
         });
     }, PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(handle);
-  }, [projectId, trainSet, tHigh, tLow, treatEmptyAsNegative, thresholdsValid]);
+  }, [projectId, trainSet, exportThreshold, tLow, treatEmptyAsNegative, thresholdsValid]);
 
   if (teachers.length === 0) {
     return (
@@ -499,10 +503,10 @@ function NewStudentForm({
       <AdvancedThresholdPanel
         open={advancedOpen}
         onToggle={() => setAdvancedOpen((v) => !v)}
-        tHigh={tHigh}
+        exportThreshold={exportThreshold}
         tLow={tLow}
         treatEmptyAsNegative={treatEmptyAsNegative}
-        onTHighChange={setTHigh}
+        onExportThresholdChange={setExportThreshold}
         onTLowChange={setTLow}
         onTreatEmptyAsNegativeChange={setTreatEmptyAsNegative}
       />
@@ -586,7 +590,7 @@ function NewStudentForm({
               detect_impl: overrides["detect"],
               segment_impl: overrides["segment"],
               track_impl: overrides["track"],
-              t_high: tHigh,
+              export_threshold: exportThreshold,
               t_low: tLow,
               treat_empty_as_negative: treatEmptyAsNegative,
               architecture,
@@ -595,12 +599,12 @@ function NewStudentForm({
             // for the next Student. Keep selections on failure so they
             // don't have to re-pick after fixing the error. Thresholds
             // also reset to defaults so the next Student doesn't quietly
-            // inherit a tweaked t_high.
+            // inherit a tweaked export_threshold.
             if (id) {
               setTrainSet(new Set());
               setEvalSet(new Set());
               setOverrides({});
-              setTHigh(DEFAULT_T_HIGH);
+              setExportThreshold(DEFAULT_EXPORT_THRESHOLD);
               setTLow(DEFAULT_T_LOW);
               setTreatEmptyAsNegative(false);
               setAdvancedOpen(false);
@@ -615,7 +619,7 @@ function NewStudentForm({
         )}
         {!thresholdsValid && (
           <span className="learn-hint learn-hint-warn">
-            t_low must be ≤ t_high
+            t_low must be ≤ export_threshold
           </span>
         )}
         {error && <div className="learn-error">{error}</div>}
@@ -844,7 +848,7 @@ function PerEvalTeacherTable({
  * Frame buckets row on the Student detail card (Phase 0.5).
  *
  *   Frame buckets   432 positive · 87 uncertain (dropped) · 156 true negatives
- *                                                            (t_high=0.35, t_low=0.15)
+ *                                                            (export_threshold=0.30, t_low=0.15)
  *
  * Old runs (pre-Phase-0) come back from the backend with all the bucket
  * counts defaulted to 0 and `per_teacher_buckets = []`. Render an em-dash
@@ -882,7 +886,7 @@ function FrameBucketsRow({
         {stats.n_uncertain_dropped} uncertain (dropped) ·{" "}
         {stats.n_true_negative_frames} true negatives{" "}
         <span className="muted">
-          (t_high={stats.t_high.toFixed(2)}, t_low={stats.t_low.toFixed(2)}
+          (export_threshold={stats.export_threshold.toFixed(2)}, t_low={stats.t_low.toFixed(2)}
           {stats.treat_empty_as_negative ? ", treat_empty_as_negative" : ""})
         </span>
       </span>
@@ -897,7 +901,7 @@ function FrameBucketsRow({
  * re-learn the layout. One row per Train teacher with that teacher's
  * three bucket counts — useful for spotting "Teacher A is dominating
  * the positive frames" or "Teacher B is contributing nothing but
- * uncertain ones (too noisy, raise its t_high?)".
+ * uncertain ones (too noisy, raise its export_threshold?)".
  */
 function PerTrainTeacherBucketTable({
   rows,
@@ -1003,7 +1007,7 @@ function BucketPreviewLine({
   if (!thresholdsValid) {
     return (
       <div className="bucket-preview bucket-preview-error">
-        <strong>Training data preview</strong> — t_low must be ≤ t_high.
+        <strong>Training data preview</strong> — t_low must be ≤ export_threshold.
       </div>
     );
   }
@@ -1036,27 +1040,27 @@ function BucketPreviewLine({
  * Collapsible "Advanced" panel — surfaces the three confidence-band knobs.
  *
  * Default-collapsed because most users will run with the spec defaults
- * (t_high=0.35, t_low=0.15). Opening it reveals a vertical stack of
- * input rows; each one carries a one-sentence description sourced from
- * the spec (`docs/student-training.md` Phase 0.4) so the user doesn't
- * need a separate doc tab to know what they're doing.
+ * (export_threshold=0.30, t_low=0.15). Opening it reveals a vertical
+ * stack of input rows; each one carries a one-sentence description
+ * sourced from the spec (`docs/student-training.md` Phase 0.4) so the
+ * user doesn't need a separate doc tab to know what they're doing.
  */
 function AdvancedThresholdPanel({
   open,
   onToggle,
-  tHigh,
+  exportThreshold,
   tLow,
   treatEmptyAsNegative,
-  onTHighChange,
+  onExportThresholdChange,
   onTLowChange,
   onTreatEmptyAsNegativeChange,
 }: {
   open: boolean;
   onToggle: () => void;
-  tHigh: number;
+  exportThreshold: number;
   tLow: number;
   treatEmptyAsNegative: boolean;
-  onTHighChange: (v: number) => void;
+  onExportThresholdChange: (v: number) => void;
   onTLowChange: (v: number) => void;
   onTreatEmptyAsNegativeChange: (v: boolean) => void;
 }) {
@@ -1076,7 +1080,7 @@ function AdvancedThresholdPanel({
         Advanced
         {!open && (
           <span className="advanced-toggle-summary">
-            t_high={tHigh.toFixed(2)} · t_low={tLow.toFixed(2)}
+            export_threshold={exportThreshold.toFixed(2)} · t_low={tLow.toFixed(2)}
             {treatEmptyAsNegative ? " · treat_empty_as_negative" : ""}
           </span>
         )}
@@ -1085,16 +1089,16 @@ function AdvancedThresholdPanel({
         <div className="advanced-panel-body">
           <div className="advanced-row">
             <label className="advanced-row-label">
-              <span className="advanced-row-name mono">t_high</span>
+              <span className="advanced-row-name mono">export_threshold</span>
               <input
                 type="number"
                 step={0.05}
                 min={0}
                 max={1}
-                value={tHigh}
+                value={exportThreshold}
                 onChange={(e) => {
                   const v = parseFloat(e.target.value);
-                  if (!Number.isNaN(v)) onTHighChange(v);
+                  if (!Number.isNaN(v)) onExportThresholdChange(v);
                 }}
               />
             </label>
@@ -1115,11 +1119,11 @@ function AdvancedThresholdPanel({
                   const v = parseFloat(e.target.value);
                   if (!Number.isNaN(v)) onTLowChange(v);
                 }}
-                aria-invalid={tLow > tHigh}
+                aria-invalid={tLow > exportThreshold}
               />
             </label>
             <span className="advanced-row-help">
-              Frames with detections only between t_low and t_high are dropped
+              Frames with detections only between t_low and export_threshold are dropped
               (teacher was unsure).
             </span>
           </div>

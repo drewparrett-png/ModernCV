@@ -114,14 +114,16 @@ class FrameBuckets:
     Frames are bucketed by the teacher's *highest* per-frame detection
     score:
 
-      • `positive`      — at least one annotation with score ≥ t_high.
-                          Frame is kept; low-score boxes on it get
-                          dropped at YOLO-label time (`min_score=t_high`).
-      • `uncertain`     — every annotation is in `[t_low, t_high)` (and
-                          there's at least one). Teacher had something
-                          to say but wasn't confident enough to commit.
-                          These frames are dropped entirely from training
-                          unless `treat_empty_as_negative=True`.
+      • `positive`      — at least one annotation with score ≥
+                          `export_threshold`. Frame is kept; low-score
+                          boxes on it get dropped at YOLO-label time
+                          (`min_score=export_threshold`).
+      • `uncertain`     — every annotation is in
+                          `[t_low, export_threshold)` (and there's at
+                          least one). Teacher had something to say but
+                          wasn't confident enough to commit. These frames
+                          are dropped entirely from training unless
+                          `treat_empty_as_negative=True`.
       • `true_negative` — no annotations at all, OR every annotation is
                           strictly below `t_low`. Strongest "really
                           empty" signal — kept as a YOLO empty .txt.
@@ -135,7 +137,9 @@ class FrameBuckets:
     true_negative: list[int] = field(default_factory=list)
 
 
-def classify_frames(coco: dict, *, t_high: float, t_low: float) -> FrameBuckets:
+def classify_frames(
+    coco: dict, *, export_threshold: float, t_low: float
+) -> FrameBuckets:
     """Pure helper: bucket every frame in a COCO dict by teacher confidence.
 
     Reused by the trainer (Phase 0.3) and the GUI preview endpoint (Phase
@@ -143,18 +147,19 @@ def classify_frames(coco: dict, *, t_high: float, t_low: float) -> FrameBuckets:
     the GUI.
 
     Bucket rules (match the dataclass docstring exactly):
-      • `positive`: any ann score ≥ t_high.
-      • `uncertain`: at least one ann in [t_low, t_high) AND no ann
-        ≥ t_high.
+      • `positive`: any ann score ≥ `export_threshold`.
+      • `uncertain`: at least one ann in [t_low, export_threshold) AND no
+        ann ≥ `export_threshold`.
       • `true_negative`: no annotations OR all anns < t_low.
 
     Annotations missing a `score` key are treated as score=1.0 (same
     convention as `_coco_to_yolo_lines`).
     """
-    if t_low > t_high:
+    if t_low > export_threshold:
         raise ValueError(
-            f"t_low ({t_low}) must be <= t_high ({t_high}) — "
-            "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+            f"t_low ({t_low}) must be <= export_threshold ({export_threshold}) — "
+            "the uncertain band [t_low, export_threshold) would otherwise "
+            "be empty/inverted."
         )
 
     # Index annotations by image id so each frame's verdict is one pass.
@@ -171,10 +176,11 @@ def classify_frames(coco: dict, *, t_high: float, t_low: float) -> FrameBuckets:
             continue
         scores = [float(a.get("score", 1.0)) for a in anns]
         max_score = max(scores)
-        if max_score >= t_high:
+        if max_score >= export_threshold:
             buckets.positive.append(frame_id)
         elif max_score >= t_low:
-            # At least one ann sits in [t_low, t_high) and none cross t_high.
+            # At least one ann sits in [t_low, export_threshold) and none
+            # cross export_threshold.
             buckets.uncertain.append(frame_id)
         else:
             # Every ann is strictly below t_low — teacher tried, came up
@@ -326,7 +332,7 @@ def prepare_yolo_dataset(
     project_id: str,
     student_dir: Path,
     train_teacher_ids: list[str],
-    t_high: float = 0.35,
+    export_threshold: float = 0.30,
     t_low: float = 0.15,
     treat_empty_as_negative: bool = False,
     split_ratio: float = DEFAULT_TRAIN_VAL_SPLIT,
@@ -344,13 +350,14 @@ def prepare_yolo_dataset(
     Per teacher, every frame is classified by its highest detection
     score:
 
-      • `positive`      (max score ≥ t_high)   — extracted, labelled
-        with `_coco_to_yolo_lines(min_score=t_high)` so low-confidence
-        boxes on otherwise-good frames don't leak into the training set.
-      • `uncertain`     (max in [t_low, t_high)) — *dropped entirely*.
-        No frame extraction, no label file. The teacher saw something
-        but wasn't sure, and using these as either positive *or*
-        negative training examples both bias the student.
+      • `positive`      (max score ≥ export_threshold) — extracted,
+        labelled with `_coco_to_yolo_lines(min_score=export_threshold)`
+        so low-confidence boxes on otherwise-good frames don't leak into
+        the training set.
+      • `uncertain`     (max in [t_low, export_threshold)) — *dropped
+        entirely*. No frame extraction, no label file. The teacher saw
+        something but wasn't sure, and using these as either positive
+        *or* negative training examples both bias the student.
       • `true_negative` (no anns OR max < t_low) — extracted with an
         empty `.txt`. This is the "really empty" signal — the teacher
         either didn't fire at all or fired only on noise.
@@ -359,20 +366,18 @@ def prepare_yolo_dataset(
     who trust their teacher: uncertain frames are reclassified to
     `true_negative` *before* extraction, so the trainer sees the same
     set of frames it did before the bucketing change. Combined with the
-    `min_score=t_high` filter on positive labels, this reproduces the
-    old training set exactly *as long as the teacher's confidence
-    threshold at Learn time was already ≥ t_high* (which is the typical
-    case — GroundingDINO's default `box_threshold` is 0.25-0.30, well
-    above the default `t_low=0.15`, so no detections fall in the
-    uncertain band in the first place).
+    `min_score=export_threshold` filter on positive labels, this
+    reproduces the old training set exactly *as long as the teacher's
+    detections all sit at or above `export_threshold`*.
 
     `progress` callback receives (stage_message, current, total) so the
     worker can write a live progress.json.
     """
-    if t_low > t_high:
+    if t_low > export_threshold:
         raise ValueError(
-            f"t_low ({t_low}) must be <= t_high ({t_high}); "
-            "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+            f"t_low ({t_low}) must be <= export_threshold ({export_threshold}); "
+            "the uncertain band [t_low, export_threshold) would otherwise "
+            "be empty/inverted."
         )
 
     rng = random.Random(seed)
@@ -411,7 +416,9 @@ def prepare_yolo_dataset(
         # Bucket the teacher's frames. The breakdown is reported even
         # when treat_empty_as_negative=True so the user sees what would
         # have been dropped by the strict policy.
-        buckets = classify_frames(coco, t_high=t_high, t_low=t_low)
+        buckets = classify_frames(
+            coco, export_threshold=export_threshold, t_low=t_low
+        )
         n_positive = len(buckets.positive)
         n_uncertain = len(buckets.uncertain)
         n_true_negative = len(buckets.true_negative)
@@ -502,20 +509,20 @@ def prepare_yolo_dataset(
 
             if frame_idx in positive_set:
                 # Positive frame — write filtered labels. Any teacher
-                # detection below `t_high` is a low-confidence box on an
-                # otherwise good frame; dropping it keeps the label set
-                # honest at the cost of a few real positives slipping
-                # through as background. The classify_frames bucketing
-                # already guaranteed there's at least one ann ≥ t_high
-                # so the resulting line list is non-empty in the normal
-                # case.
+                # detection below `export_threshold` is a low-confidence
+                # box on an otherwise good frame; dropping it keeps the
+                # label set honest at the cost of a few real positives
+                # slipping through as background. The classify_frames
+                # bucketing already guaranteed there's at least one ann
+                # ≥ export_threshold so the resulting line list is
+                # non-empty in the normal case.
                 anns = anns_by_image.get(frame_idx, [])
                 lines = _coco_to_yolo_lines(
                     anns,
                     img_w=int(img.get("width") or 0),
                     img_h=int(img.get("height") or 0),
                     coco_to_global=cat_map,
-                    min_score=t_high,
+                    min_score=export_threshold,
                 )
             else:
                 # True negative (or escape-hatch reclassified uncertain) —
@@ -548,7 +555,7 @@ def prepare_yolo_dataset(
             f"{MIN_TRAIN_ANNOTATIONS} to attempt training. "
             "The Teacher run(s) likely didn't detect the target object — "
             "check the Teacher's per-frame labels (Inspector) and consider "
-            "lowering box_threshold/text_threshold or rewording the prompt."
+            "lowering export_threshold or rewording the prompt."
         )
 
     # Build the YOLO data.yaml. Paths are absolute so YOLO doesn't try to

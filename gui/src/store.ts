@@ -48,12 +48,6 @@ import type {
 interface LearnFormState {
   videoPath: string;
   maxFrames: number | null;
-  /** Confidence threshold for box scores. Defaults match the GroundingDINO
-   *  adapter's defaults (0.30 / 0.25); lower box_threshold to ~0.15-0.20
-   *  for small-object prompts. Phase 2 will drop these. */
-  boxThreshold: number;
-  textThreshold: number;
-  fullResolution: boolean;
 }
 
 interface State {
@@ -316,9 +310,6 @@ export const useStore = create<State>((set, get) => ({
   learnForm: {
     videoPath: "",
     maxFrames: 60,
-    boxThreshold: 0.3,
-    textThreshold: 0.25,
-    fullResolution: false,
   },
   setLearnField(key, value) {
     set({ learnForm: { ...get().learnForm, [key]: value } });
@@ -401,9 +392,6 @@ export const useStore = create<State>((set, get) => ({
     const req: LearnRequest = {
       video_path: learnForm.videoPath,
       max_frames: learnForm.maxFrames ?? undefined,
-      box_threshold: learnForm.boxThreshold,
-      text_threshold: learnForm.textThreshold,
-      full_resolution: learnForm.fullResolution || undefined,
     };
     let initial: RunDetail;
     try {

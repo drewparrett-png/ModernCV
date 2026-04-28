@@ -126,9 +126,34 @@ export async function fetchRuns(projectId: string): Promise<RunsResponse> {
 export async function fetchRunDetail(
   projectId: string,
   id: string,
+  threshold?: number,
 ): Promise<RunDetail> {
-  const res = await fetch(`${p(projectId)}/runs/${encodeURIComponent(id)}`);
+  const url = new URL(`${p(projectId)}/runs/${encodeURIComponent(id)}`);
+  if (threshold !== undefined) {
+    url.searchParams.set("threshold", String(threshold));
+  }
+  const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`GET .../runs/${id}: ${res.status}`);
+  return res.json();
+}
+
+export async function patchRunDisplayThreshold(
+  projectId: string,
+  id: string,
+  display_threshold: number,
+): Promise<RunDetail> {
+  const res = await fetch(
+    `${p(projectId)}/runs/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_threshold }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PATCH .../runs/${id}: ${res.status} ${text}`);
+  }
   return res.json();
 }
 

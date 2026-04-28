@@ -33,6 +33,7 @@ import {
   fetchRejections,
   fetchRunDetail,
   fetchRunLabels,
+  patchRunDisplayThreshold,
   runFrameUrl,
   toggleRejection as apiToggleRejection,
   type RejectionMap,
@@ -138,6 +139,10 @@ export function RunInspector() {
   // Shared view across both panes — wheel/drag on either updates this and
   // both re-render in lockstep.
   const [view, setView] = useState<View>(IDENTITY_VIEW);
+  // Phase 2: post-hoc display threshold. Initialized from the manifest
+  // when the run loads; the slider drives it live (client-side filter)
+  // and a debounced effect PATCHes it back to the backend.
+  const [threshold, setThreshold] = useState<number>(0.3);
 
   useEffect(() => {
     if (!runId || !projectId) return;
@@ -158,9 +163,32 @@ export function RunInspector() {
         setDetail(d);
         setLabels(l);
         setRejections(r);
+        setThreshold(d.manifest.display_threshold);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [runId, projectId]);
+
+  // PATCH the manifest after the slider settles. Skips when the value
+  // already matches what's on disk (initial load, or the user dragged
+  // back to the persisted value). Refresh the detail after the PATCH so
+  // any server-recomputed stats land in the local copy.
+  useEffect(() => {
+    if (!runId || !projectId || !detail) return;
+    if (threshold === detail.manifest.display_threshold) return;
+    const handle = setTimeout(async () => {
+      try {
+        const updated = await patchRunDisplayThreshold(
+          projectId,
+          runId,
+          threshold,
+        );
+        setDetail(updated);
+      } catch (e) {
+        console.error("PATCH display_threshold failed", e);
+      }
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [threshold, projectId, runId, detail]);
 
   // Reset the zoom every time the user steps to a different frame — keeping
   // a 5x zoom across an entire scrub would be more disorienting than useful.
@@ -175,17 +203,23 @@ export function RunInspector() {
     return m;
   }, [labels]);
 
+  // Counts respect both the rejection state and the live threshold —
+  // matches what the canvas + label panel actually paint, so the header
+  // tally never disagrees with the visible boxes.
   const kept_total = useMemo(() => {
     if (!labels) return [0, 0] as const;
     let total = 0;
-    let rejected = 0;
+    let kept = 0;
     for (const l of labels) {
-      total += l.detections.length;
-      const dropped = rejections[String(l.frame_idx)];
-      if (dropped) rejected += dropped.length;
+      const dropped = new Set(rejections[String(l.frame_idx)] ?? []);
+      l.detections.forEach((d, i) => {
+        if (d.score < threshold) return;
+        total += 1;
+        if (!dropped.has(i)) kept += 1;
+      });
     }
-    return [total - rejected, total] as const;
-  }, [labels, rejections]);
+    return [kept, total] as const;
+  }, [labels, rejections, threshold]);
 
   const handleToggle = useCallback(
     async (detIdx: number) => {
@@ -246,6 +280,19 @@ export function RunInspector() {
             )}
           </div>
           <div className="inspector-header-actions">
+            <label className="threshold-slider" title="Hide detections below this score. Persists to the run's manifest.">
+              <span className="threshold-slider-label mono">
+                ≥ {threshold.toFixed(2)}
+              </span>
+              <input
+                type="range"
+                min={0.05}
+                max={1}
+                step={0.01}
+                value={threshold}
+                onChange={(e) => setThreshold(Number(e.target.value))}
+              />
+            </label>
             <span className="zoom-indicator mono">
               {view.zoom.toFixed(1)}×
             </span>
@@ -291,6 +338,7 @@ export function RunInspector() {
                 onToggle={handleToggle}
                 view={view}
                 onViewChange={setView}
+                threshold={threshold}
               />
               <LabelPanel
                 labels={currentLabels}
@@ -298,6 +346,7 @@ export function RunInspector() {
                 hoveredIdx={hoveredIdx}
                 onHover={setHoveredIdx}
                 onToggle={handleToggle}
+                threshold={threshold}
               />
             </div>
 
@@ -355,6 +404,10 @@ interface FrameViewProps {
   onToggle?: (idx: number) => void;
   view: View;
   onViewChange: (v: View) => void;
+  /** Phase 2: hide detections strictly below this score. Index identity
+   *  is preserved (rejection toggles still address the original list);
+   *  hidden boxes simply don't paint. */
+  threshold?: number;
 }
 
 function FrameView({
@@ -367,6 +420,7 @@ function FrameView({
   onToggle,
   view,
   onViewChange,
+  threshold = 0,
 }: FrameViewProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -433,6 +487,10 @@ function FrameView({
       ctx.textBaseline = "alphabetic";
 
       detections.forEach((d, i) => {
+        // Phase 2 post-hoc filter: skip painting low-confidence boxes.
+        // Index identity is preserved so the hit-test + rejection toggle
+        // still address the original detection list.
+        if (d.score < threshold) return;
         const isRejected = rejected?.has(i) ?? false;
         const isHovered = hoveredIdx === i;
         const [x1, y1, x2, y2] = d.bbox_xyxy;
@@ -497,7 +555,7 @@ function FrameView({
       img.removeEventListener("load", paint);
       ro.disconnect();
     };
-  }, [detections, rejected, hoveredIdx, src, view]);
+  }, [detections, rejected, hoveredIdx, src, view, threshold]);
 
   const interactive = Boolean(detections && (onHover || onToggle));
 
@@ -653,28 +711,35 @@ function LabelPanel({
   hoveredIdx,
   onHover,
   onToggle,
+  threshold = 0,
 }: {
   labels: PerFrameLabels | undefined;
   rejected: Set<number>;
   hoveredIdx: number | null;
   onHover: (idx: number | null) => void;
   onToggle: (detIdx: number) => void;
+  threshold?: number;
 }) {
-  if (!labels || labels.detections.length === 0) {
+  // Mirror the canvas: skip below-threshold rows. Index identity is
+  // preserved so the badge number lines up with the canvas badge.
+  const visible = (labels?.detections ?? []).flatMap((d, i) =>
+    d.score < threshold ? [] : [{ d, i }],
+  );
+  if (!labels || visible.length === 0) {
     return (
       <div className="label-panel empty">
         No detections on this frame.
       </div>
     );
   }
-  const keptCount = labels.detections.length - rejected.size;
+  const keptCount = visible.filter(({ i }) => !rejected.has(i)).length;
   return (
     <div className="label-panel">
       <div className="label-panel-title">
-        {keptCount} kept / {labels.detections.length} on this frame
+        {keptCount} kept / {visible.length} on this frame
       </div>
       <ul className="label-list">
-        {labels.detections.map((d, i) => {
+        {visible.map(({ d, i }) => {
           const isRejected = rejected.has(i);
           const isHovered = hoveredIdx === i;
           return (

@@ -70,9 +70,6 @@ class _LearnJob:
     reid_impl: Optional[str]
     track_impl: Optional[str]
     max_frames: Optional[int]
-    box_threshold: Optional[float]
-    text_threshold: Optional[float]
-    full_resolution: Optional[bool]
 
 
 _LEARN_QUEUE: "queue.Queue[Optional[_LearnJob]]" = queue.Queue()
@@ -181,9 +178,6 @@ def _execute_queued_job(job: _LearnJob) -> None:
         reid_impl=job.reid_impl,
         track_impl=job.track_impl,
         max_frames=job.max_frames,
-        box_threshold=job.box_threshold,
-        text_threshold=job.text_threshold,
-        full_resolution=job.full_resolution,
     )
 
 
@@ -370,9 +364,6 @@ def build_graph(
     reid_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     max_frames: Optional[int] = None,
-    box_threshold: Optional[float] = None,
-    text_threshold: Optional[float] = None,
-    full_resolution: Optional[bool] = None,
 ) -> tuple[GraphSpec, dict[str, str]]:
     """Translate a LearnRequest's intent into a linear GraphSpec.
 
@@ -401,15 +392,6 @@ def build_graph(
     detect_params: dict = {"prompt": prompt}
     if prompts:
         detect_params["prompts"] = list(prompts)
-    if box_threshold is not None:
-        detect_params["box_threshold"] = box_threshold
-    if text_threshold is not None:
-        detect_params["text_threshold"] = text_threshold
-    if full_resolution:
-        # Only the GroundingDINO adapter consumes this — other detectors
-        # (yolo, rtdetr) silently ignore it via their **params catch-all,
-        # so it's safe to set unconditionally when the user asks for it.
-        detect_params["full_resolution"] = True
     nodes.append(
         NodeSpec(
             id="n_detect",
@@ -498,9 +480,6 @@ def run_learn(
     reid_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     max_frames: Optional[int] = None,
-    box_threshold: Optional[float] = None,
-    text_threshold: Optional[float] = None,
-    full_resolution: Optional[bool] = None,
     runs_root: Path = runs_mod.RUNS_DIR,
 ) -> runs_mod.RunManifest:
     """Synchronous Learn run. Used by CLI/tests.
@@ -534,9 +513,6 @@ def run_learn(
         reid_impl=reid_impl,
         track_impl=track_impl,
         max_frames=max_frames,
-        box_threshold=box_threshold,
-        text_threshold=text_threshold,
-        full_resolution=full_resolution,
     )
 
 
@@ -552,9 +528,6 @@ def run_learn_in_background(
     reid_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     max_frames: Optional[int] = None,
-    box_threshold: Optional[float] = None,
-    text_threshold: Optional[float] = None,
-    full_resolution: Optional[bool] = None,
     runs_root: Path = runs_mod.RUNS_DIR,
 ) -> runs_mod.RunManifest:
     """Allocate the run dir + manifest, then process in a daemon thread.
@@ -636,9 +609,6 @@ def run_learn_in_background(
         reid_impl=reid_impl,
         track_impl=track_impl,
         max_frames=max_frames,
-        box_threshold=box_threshold,
-        text_threshold=text_threshold,
-        full_resolution=full_resolution,
     )
     ensure_learn_worker_started()
     _LEARN_QUEUE.put(job)
@@ -665,9 +635,6 @@ def _run_with_dir(
     reid_impl: Optional[str],
     track_impl: Optional[str],
     max_frames: Optional[int],
-    box_threshold: Optional[float] = None,
-    text_threshold: Optional[float] = None,
-    full_resolution: Optional[bool] = None,
 ) -> runs_mod.RunManifest:
     """Shared body for sync + background entry points.
 
@@ -723,9 +690,6 @@ def _run_with_dir(
             reid_impl=reid_impl,
             track_impl=track_impl,
             max_frames=max_frames,
-            box_threshold=box_threshold,
-            text_threshold=text_threshold,
-            full_resolution=full_resolution,
         )
     except ValueError as e:
         runs_mod.mark_failed(rdir, str(e))

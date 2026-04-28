@@ -995,6 +995,26 @@ html, body, #root {
   gap: 8px;
 }
 
+.threshold-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.threshold-slider-label {
+  font-size: 12px;
+  color: #374151;
+  min-width: 48px;
+}
+
+.threshold-slider input[type="range"] {
+  width: 140px;
+}
+
 .zoom-indicator {
   font-size: 12px;
   color: #6b7280;

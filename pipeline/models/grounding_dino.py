@@ -9,10 +9,12 @@ Block params consumed
 ---------------------
     prompt          : str   — the text query, e.g. "soccer ball"
                               (multi-class is supported via "ball . player")
-    box_threshold   : float — keep boxes with score ≥ this  (default 0.30)
-    text_threshold  : float — text-token confidence floor   (default 0.25)
     model_id        : str   — HF repo id, default "IDEA-Research/grounding-dino-tiny"
                               ("…-base" for the larger Swin-B variant)
+
+Phase 2: both score thresholds are pinned to `SCORE_FLOOR` so every
+plausible detection is persisted; the GUI filters downstream via the
+manifest's `display_threshold`.
 
 MPS notes
 ---------
@@ -42,6 +44,13 @@ from pipeline.models.registry import register
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+
+# Phase 2 contract: every detection that clears this floor is persisted.
+# The GUI filters post-hoc using the manifest's `display_threshold`, so
+# raising the floor would silently throw away signal the user could have
+# recovered later. Lower it only if downstream stats helpers can handle
+# the larger detection volume.
+SCORE_FLOOR = 0.05
 
 
 def _pick_device() -> str:
@@ -183,8 +192,12 @@ class GroundingDINOAdapter(Adapter):
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         self.model_id: str = self.params.get("model_id", DEFAULT_MODEL_ID)
-        self.box_threshold: float = float(self.params.get("box_threshold", 0.30))
-        self.text_threshold: float = float(self.params.get("text_threshold", 0.25))
+        # Phase 2: detections are persisted at a fixed low floor; the GUI
+        # filters post-hoc with the manifest's `display_threshold`. Both
+        # GroundingDINO score thresholds are pinned to the same floor so
+        # the post-processor returns every plausible detection.
+        self.box_threshold: float = SCORE_FLOOR
+        self.text_threshold: float = SCORE_FLOOR
         # Prompt may arrive as either:
         #   params.prompts  : list[str]  — preferred; one chip per class
         #   params.prompt   : str        — legacy; single phrase or "."-joined
@@ -415,9 +428,9 @@ def reset_class_ids() -> None:
 
 
 # Param schema — useful for the GUI later. Not consumed yet.
+# Phase 2 dropped the box/text threshold knobs; the adapter pins both to
+# SCORE_FLOOR and the GUI filters post-hoc via display_threshold.
 PARAM_SCHEMA: dict[str, Any] = {
     "prompt": {"type": "string", "default": "", "description": "Text query"},
-    "box_threshold": {"type": "number", "default": 0.30, "min": 0.0, "max": 1.0},
-    "text_threshold": {"type": "number", "default": 0.25, "min": 0.0, "max": 1.0},
     "model_id": {"type": "string", "default": DEFAULT_MODEL_ID},
 }

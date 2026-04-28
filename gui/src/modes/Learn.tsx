@@ -137,68 +137,6 @@ export function Learn() {
             </span>
           </label>
 
-          <details className="advanced-section">
-            <summary>Advanced — detector thresholds</summary>
-            <div className="advanced-body">
-              <p className="advanced-blurb">
-                Lower thresholds catch smaller / fainter objects but admit
-                more false positives. For small-object prompts like
-                <code> soccer ball</code> on wide stadium shots, try
-                box ≈ 0.15. The default 0.30 works well for player-sized
-                objects.
-              </p>
-              <label className="field field-inline">
-                <span className="field-label">Box threshold</span>
-                <input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  value={form.boxThreshold}
-                  onChange={(e) =>
-                    setField("boxThreshold", Number(e.target.value))
-                  }
-                  className="frame-cap"
-                />
-                <span className="field-hint">
-                  Score floor for a box to be kept (default 0.30).
-                </span>
-              </label>
-              <label className="field field-inline">
-                <span className="field-label">Text threshold</span>
-                <input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  value={form.textThreshold}
-                  onChange={(e) =>
-                    setField("textThreshold", Number(e.target.value))
-                  }
-                  className="frame-cap"
-                />
-                <span className="field-hint">
-                  Score floor for matching the text prompt (default 0.25).
-                </span>
-              </label>
-              <label className="field field-inline">
-                <span className="field-label">Full resolution</span>
-                <input
-                  type="checkbox"
-                  checked={form.fullResolution}
-                  onChange={(e) =>
-                    setField("fullResolution", e.target.checked)
-                  }
-                />
-                <span className="field-hint">
-                  Skip the GroundingDINO processor's resize (default
-                  shrinks 1080p → 1333×750). Helps small objects like the
-                  ball; ~2× slower per frame.
-                </span>
-              </label>
-            </div>
-          </details>
-
           <div className="run-row">
             <button type="button" className="run-button" onClick={() => start()}>
               Start Teacher
@@ -351,8 +289,9 @@ function TeacherRowDetail({
         stats.frames_with_detections === 0 && (
           <div className="result-hint">
             <strong>No detections were kept.</strong> Try lowering the
-            <em> Box threshold</em> in Advanced (0.15–0.20 for small objects)
-            or sharpening the prompt — e.g. <code>"white black soccer ball"</code>.
+            <em> display threshold</em> in the inspector (down to 0.05),
+            or sharpening the prompt — e.g.{" "}
+            <code>"white black soccer ball"</code>.
           </div>
         )}
 

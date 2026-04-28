@@ -42,7 +42,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import cv2
 from fastapi import FastAPI, HTTPException, Query
@@ -82,6 +82,7 @@ from server.schemas import (
     RejectToggleRequest,
     RunDetail,
     RunManifestModel,
+    RunPatchRequest,
     RunProgressModel,
     RunRequest,
     RunsResponse,
@@ -255,12 +256,21 @@ def _manifest_to_model(
     )
 
 
-def _run_detail(project_id: str, run_id: str) -> RunDetail:
+def _run_detail(
+    project_id: str,
+    run_id: str,
+    threshold_override: Optional[float] = None,
+) -> RunDetail:
     rdir = runs_mod.run_dir(project_id, run_id)
     if not (rdir / runs_mod.MANIFEST_NAME).exists():
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     manifest = runs_mod.read_manifest(rdir)
-    stats = runs_mod.read_stats(rdir)
+    threshold = (
+        threshold_override
+        if threshold_override is not None
+        else manifest.display_threshold
+    )
+    stats = runs_mod.compute_stats_at_threshold(rdir, threshold)
     progress = runs_mod.read_progress(rdir)
     return RunDetail(
         manifest=_manifest_to_model(project_id, manifest, rdir),
@@ -283,9 +293,6 @@ def learn_endpoint(project_id: str, req: LearnRequest) -> RunDetail:
             reid_impl=req.reid_impl,
             track_impl=req.track_impl,
             max_frames=req.max_frames,
-            box_threshold=req.box_threshold,
-            text_threshold=req.text_threshold,
-            full_resolution=req.full_resolution,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -303,8 +310,33 @@ def runs_list(project_id: str) -> RunsResponse:
 
 
 @app.get("/projects/{project_id}/runs/{run_id}", response_model=RunDetail)
-def run_detail(project_id: str, run_id: str) -> RunDetail:
+def run_detail(
+    project_id: str,
+    run_id: str,
+    threshold: Optional[float] = Query(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Preview override for the post-hoc display threshold. When "
+            "omitted the manifest's `display_threshold` is used. Does "
+            "not persist — pass via PATCH to save."
+        ),
+    ),
+) -> RunDetail:
     _require_project(project_id)
+    return _run_detail(project_id, run_id, threshold_override=threshold)
+
+
+@app.patch("/projects/{project_id}/runs/{run_id}", response_model=RunDetail)
+def patch_run(
+    project_id: str, run_id: str, req: RunPatchRequest
+) -> RunDetail:
+    _require_project(project_id)
+    rdir = runs_mod.run_dir(project_id, run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+    runs_mod.set_display_threshold(rdir, req.display_threshold)
     return _run_detail(project_id, run_id)
 
 
@@ -533,7 +565,7 @@ def optimize_endpoint(project_id: str, req: OptimizeRequest) -> StudentDetail:
             segment_impl=req.segment_impl,
             track_impl=req.track_impl,
             epochs=req.epochs,
-            t_high=req.t_high,
+            export_threshold=req.export_threshold,
             t_low=req.t_low,
             treat_empty_as_negative=req.treat_empty_as_negative,
             architecture=req.architecture,
@@ -607,7 +639,7 @@ def preview_buckets(
             )
 
         buckets = distill.classify_frames(
-            coco, t_high=req.t_high, t_low=req.t_low,
+            coco, export_threshold=req.export_threshold, t_low=req.t_low,
         )
         positive = len(buckets.positive)
         uncertain = len(buckets.uncertain)
