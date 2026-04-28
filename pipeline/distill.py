@@ -42,7 +42,7 @@ import random
 import shutil
 import time
 from contextlib import redirect_stdout, redirect_stderr
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -85,6 +85,90 @@ class DatasetSummary:
     n_train_annotations: int
     n_val_images: int
     class_names: list[str]
+    # Confidence-band bucket counts (Phase 0.3). Defaulted so test code or
+    # callers that don't care about bucketing still construct cleanly.
+    n_positive_frames: int = 0
+    n_uncertain_dropped: int = 0
+    n_true_negative_frames: int = 0
+    # Per-train-teacher bucket breakdown:
+    # [{"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int}, ...]
+    per_teacher_buckets: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class FrameBuckets:
+    """Per-frame confidence-band classification for one teacher's COCO.
+
+    Frames are bucketed by the teacher's *highest* per-frame detection
+    score:
+
+      • `positive`      — at least one annotation with score ≥ t_high.
+                          Frame is kept; low-score boxes on it get
+                          dropped at YOLO-label time (`min_score=t_high`).
+      • `uncertain`     — every annotation is in `[t_low, t_high)` (and
+                          there's at least one). Teacher had something
+                          to say but wasn't confident enough to commit.
+                          These frames are dropped entirely from training
+                          unless `treat_empty_as_negative=True`.
+      • `true_negative` — no annotations at all, OR every annotation is
+                          strictly below `t_low`. Strongest "really
+                          empty" signal — kept as a YOLO empty .txt.
+
+    Frame ids are the COCO image ids (== source video frame index, by
+    convention in this project).
+    """
+
+    positive: list[int] = field(default_factory=list)
+    uncertain: list[int] = field(default_factory=list)
+    true_negative: list[int] = field(default_factory=list)
+
+
+def classify_frames(coco: dict, *, t_high: float, t_low: float) -> FrameBuckets:
+    """Pure helper: bucket every frame in a COCO dict by teacher confidence.
+
+    Reused by the trainer (Phase 0.3) and the GUI preview endpoint (Phase
+    0.4). No I/O, no numpy — small enough to run on every keystroke in
+    the GUI.
+
+    Bucket rules (match the dataclass docstring exactly):
+      • `positive`: any ann score ≥ t_high.
+      • `uncertain`: at least one ann in [t_low, t_high) AND no ann
+        ≥ t_high.
+      • `true_negative`: no annotations OR all anns < t_low.
+
+    Annotations missing a `score` key are treated as score=1.0 (same
+    convention as `_coco_to_yolo_lines`).
+    """
+    if t_low > t_high:
+        raise ValueError(
+            f"t_low ({t_low}) must be <= t_high ({t_high}) — "
+            "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+        )
+
+    # Index annotations by image id so each frame's verdict is one pass.
+    anns_by_image: dict[int, list[dict]] = {}
+    for ann in coco.get("annotations", []):
+        anns_by_image.setdefault(int(ann["image_id"]), []).append(ann)
+
+    buckets = FrameBuckets()
+    for img in coco.get("images", []):
+        frame_id = int(img["id"])
+        anns = anns_by_image.get(frame_id, [])
+        if not anns:
+            buckets.true_negative.append(frame_id)
+            continue
+        scores = [float(a.get("score", 1.0)) for a in anns]
+        max_score = max(scores)
+        if max_score >= t_high:
+            buckets.positive.append(frame_id)
+        elif max_score >= t_low:
+            # At least one ann sits in [t_low, t_high) and none cross t_high.
+            buckets.uncertain.append(frame_id)
+        else:
+            # Every ann is strictly below t_low — teacher tried, came up
+            # with nothing convincing. Strongest "really empty" signal.
+            buckets.true_negative.append(frame_id)
+    return buckets
 
 
 def _read_teacher_coco(teacher_id: str) -> tuple[dict, str]:
@@ -153,6 +237,7 @@ def _coco_to_yolo_lines(
     img_w: int,
     img_h: int,
     coco_to_global: dict[int, int],
+    min_score: float = 0.0,
 ) -> list[str]:
     """Convert COCO annotations (x,y,w,h in pixels) to YOLO's normalized
     `class cx cy w h` (all in [0,1]).
@@ -163,6 +248,11 @@ def _coco_to_yolo_lines(
     vocabulary) are dropped silently — that only happens when called for
     an eval teacher whose vocab is a superset of train's, and the trainer
     already logged a warning in that case.
+
+    `min_score` filters annotations by `ann["score"]`. Default 0.0
+    preserves prior behaviour (no filtering). Annotations missing a
+    `score` key are treated as score=1.0 so future user-added labels (no
+    teacher-confidence attached) pass through unchanged.
     """
     if img_w <= 0 or img_h <= 0:
         return []
@@ -170,6 +260,8 @@ def _coco_to_yolo_lines(
     for ann in annotations:
         cat = ann.get("category_id")
         if cat not in coco_to_global:
+            continue
+        if float(ann.get("score", 1.0)) < min_score:
             continue
         x, y, w, h = ann["bbox"]
         # COCO bbox can occasionally be slightly out of image due to int
