@@ -732,6 +732,10 @@ def _run_with_dir(
     per_frame_ms: list[float] = []
     n_detections_total = 0
     frames_with_detections = 0
+    # Accumulate per-frame records in memory so we can compute the detection
+    # breakdown (per-class + per-frame distribution) once at the end. For
+    # 50–10,000 frames this is fine; the records are tiny dicts.
+    per_frame_records: list[dict] = []
 
     try:
         with runs_mod.PerFrameWriter(rdir) as pfw:
@@ -749,6 +753,9 @@ def _run_with_dir(
                     frames_with_detections += 1
                     n_detections_total += len(dets)
                 pfw.write(batch.frame_index, dets, masks=None)
+                per_frame_records.append(
+                    {"frame_idx": batch.frame_index, "detections": dets}
+                )
 
                 if (batch.frame_index + 1) % PROGRESS_FLUSH_EVERY == 0:
                     _progress(
@@ -771,6 +778,9 @@ def _run_with_dir(
 
     n = max(1, len(per_frame_ms))
     sorted_ms = sorted(per_frame_ms)
+    breakdown = runs_mod.compute_detection_breakdown(
+        per_frame_records, frames_processed=len(per_frame_ms)
+    )
     stats = runs_mod.RunStats(
         frames_processed=len(per_frame_ms),
         frames_with_detections=frames_with_detections,
@@ -779,5 +789,6 @@ def _run_with_dir(
         p50_ms_per_frame=sorted_ms[n // 2] if sorted_ms else 0.0,
         p95_ms_per_frame=sorted_ms[min(n - 1, int(n * 0.95))] if sorted_ms else 0.0,
         n_detections_total=n_detections_total,
+        **breakdown,
     )
     return runs_mod.mark_completed(rdir, stats)

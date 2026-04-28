@@ -12,9 +12,10 @@
 
 import { useMemo, useState, type KeyboardEvent } from "react";
 import { useStore } from "../store";
-import type { RunDetail, RunProgress, Task } from "../types";
+import type { RunDetail, RunProgress, RunStats, Task } from "../types";
 import { runOverlayUrl } from "../api";
 import { VideoTreePicker } from "../components/VideoTreePicker";
+import { colorForClass } from "../classColors";
 
 const TASK_DESCRIPTIONS: Record<Task, string> = {
   detection:
@@ -383,6 +384,10 @@ function TeacherRowDetail({
         )}
       </dl>
 
+      {stats && stats.frames_processed > 0 && (
+        <DetectionBreakdown stats={stats} />
+      )}
+
       {manifest.status === "completed" &&
         stats &&
         stats.frames_with_detections === 0 && (
@@ -440,6 +445,121 @@ function TeacherRowDetail({
  * Whitespace inside a chip is preserved on purpose — "soccer ball" and
  * "white black ball" are valid single phrases.
  */
+
+/**
+ * Detection breakdown for a Teacher run — answers "how many of each class
+ * did we find, and how many detections did we typically have per frame?".
+ *
+ * Renders three blocks:
+ *   1. Per-class table  (one row per class with a color swatch matching
+ *      what the Inspector overlays will paint)
+ *   2. Per-frame count distribution (min · p50 · p95 · max · avg)
+ *   3. Tiny inline histogram of dets-per-frame so you can eyeball whether
+ *      detections cluster around a number ("usually 8 players visible") or
+ *      are spread (e.g. ball appears in only some frames)
+ *
+ * Renders nothing when the run has no breakdown yet (older runs, or runs
+ * that produced zero detections — those have a separate hint elsewhere).
+ */
+function DetectionBreakdown({ stats }: { stats: RunStats }) {
+  const classes = Object.entries(stats.detections_per_class || {}).sort(
+    (a, b) => b[1].n_detections - a[1].n_detections,
+  );
+  const frames = stats.frames_processed;
+  const hist = stats.per_frame_count_histogram || {};
+  const histEntries = Object.entries(hist)
+    .map(([k, v]) => [Number(k), v] as const)
+    .sort((a, b) => a[0] - b[0]);
+  const histMaxV = histEntries.reduce((m, [, v]) => Math.max(m, v), 0);
+
+  if (classes.length === 0 && histEntries.length === 0) return null;
+
+  return (
+    <section className="detection-breakdown">
+      <h3 className="dbk-title">Detection breakdown</h3>
+
+      {classes.length > 0 && (
+        <table className="dbk-class-table">
+          <thead>
+            <tr>
+              <th>Class</th>
+              <th className="num">Total</th>
+              <th className="num" title="Frames where ≥1 detection of this class appeared">
+                Frames
+              </th>
+              <th className="num" title="Most detections of this class in any single frame">
+                Max
+              </th>
+              <th
+                className="num"
+                title="Mean detections per frame, across all frames in the run"
+              >
+                avg/frame
+              </th>
+              <th
+                className="num"
+                title="Mean detections per frame, restricted to frames where this class was present"
+              >
+                avg/present
+              </th>
+              <th className="num" title="Mean detector confidence">
+                conf
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {classes.map(([name, s]) => (
+              <tr key={name}>
+                <td>
+                  <span
+                    className="dbk-swatch"
+                    style={{ backgroundColor: colorForClass(name) }}
+                    aria-hidden
+                  />
+                  <span className="dbk-class-name">{name}</span>
+                </td>
+                <td className="num mono">{s.n_detections}</td>
+                <td className="num mono">
+                  {s.frames_present}/{frames}
+                </td>
+                <td className="num mono">{s.max_in_frame}</td>
+                <td className="num mono">{s.avg_per_frame.toFixed(2)}</td>
+                <td className="num mono">{s.avg_per_present_frame.toFixed(2)}</td>
+                <td className="num mono">{s.score_avg.toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="dbk-distribution">
+        <div className="dbk-distribution-row">
+          <span className="dbk-label">Detections / frame</span>
+          <span className="mono">
+            min {stats.per_frame_count_min} · p50 {stats.per_frame_count_p50} ·
+            p95 {stats.per_frame_count_p95} · max {stats.per_frame_count_max} ·
+            avg {stats.per_frame_count_avg.toFixed(2)}
+          </span>
+        </div>
+
+        {histEntries.length > 0 && (
+          <div className="dbk-histogram" role="img" aria-label="Detections per frame histogram">
+            {histEntries.map(([count, v]) => (
+              <div className="dbk-hist-col" key={count} title={`${v} frame${v === 1 ? "" : "s"} with ${count} det${count === 1 ? "" : "s"}`}>
+                <div
+                  className="dbk-hist-bar"
+                  style={{ height: `${histMaxV ? (v / histMaxV) * 100 : 0}%` }}
+                />
+                <div className="dbk-hist-tick mono">{count}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function PromptChips({
   chips,
   onChange,

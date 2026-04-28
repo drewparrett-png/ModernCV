@@ -38,6 +38,7 @@ import {
   type RejectionMap,
 } from "../api";
 import type { PerFrameLabels, RunDetail } from "../types";
+import { colorForClass } from "../classColors";
 
 interface Layout {
   /** Top-left of the *rendered image* inside its element box. */
@@ -46,6 +47,17 @@ interface Layout {
   /** Pixel-space → element-space scaling. */
   sx: number;
   sy: number;
+}
+
+/** "#22c55e" + 0.85 → "rgba(34,197,94,0.85)". Used for badges/score chips
+ *  whose fill color is derived from a class color but needs alpha. */
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace("#", "");
+  const v =
+    h.length === 3
+      ? h.split("").map((c) => parseInt(c + c, 16))
+      : [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  return `rgba(${v[0]}, ${v[1]}, ${v[2]}, ${alpha})`;
 }
 
 /** Compute the contain-fit rectangle: where the image actually paints
@@ -295,6 +307,16 @@ export function RunInspector() {
               />
             </div>
 
+            {labels && labels.length > 0 && (
+              <PerFrameCountChart
+                labels={labels}
+                rejections={rejections}
+                totalFrames={totalFrames}
+                currentFrame={frameIdx}
+                onSeek={setFrameIdx}
+              />
+            )}
+
             <div className="scrubber-row">
               <button
                 type="button"
@@ -435,7 +457,11 @@ function FrameView({
         const W = (x2 - x1) * layout.sx;
         const H = (y2 - y1) * layout.sy;
 
-        const stroke = isRejected ? "#ef4444" : "#22c55e";
+        // Kept detections take their class's color so you can pick
+        // "balls vs players" at a glance in dense scenes. Rejected stays
+        // red + dashed regardless of class — the action overrides identity.
+        const classColor = colorForClass(d.class_name);
+        const stroke = isRejected ? "#ef4444" : classColor;
         ctx.lineWidth = isHovered ? 3 : 2;
         ctx.setLineDash(isRejected ? [5, 4] : []);
         ctx.strokeStyle = stroke;
@@ -454,7 +480,7 @@ function FrameView({
         const badgeY = Y + badgeR;
         ctx.fillStyle = isRejected
           ? "rgba(239,68,68,0.95)"
-          : "rgba(34,197,94,0.95)";
+          : hexToRgba(classColor, 0.95);
         ctx.beginPath();
         ctx.arc(badgeX, badgeY, badgeR, 0, Math.PI * 2);
         ctx.fill();
@@ -469,7 +495,7 @@ function FrameView({
           const label = `${d.score.toFixed(2)}`;
           const textW = ctx.measureText(label).width + 8;
           const textH = 16;
-          ctx.fillStyle = "rgba(34,197,94,0.85)";
+          ctx.fillStyle = hexToRgba(classColor, 0.85);
           ctx.fillRect(
             X + W - textW,
             Math.max(0, Y - textH),
@@ -689,10 +715,22 @@ function LabelPanel({
             >
               <span
                 className={`label-badge ${isRejected ? "rejected" : ""}`}
+                style={
+                  isRejected
+                    ? undefined
+                    : { backgroundColor: colorForClass(d.class_name) }
+                }
               >
                 {i + 1}
               </span>
-              <span className="label-class">{d.class_name}</span>
+              <span className="label-class">
+                <span
+                  className="label-swatch"
+                  style={{ backgroundColor: colorForClass(d.class_name) }}
+                  aria-hidden
+                />
+                {d.class_name}
+              </span>
               <span className="label-score">{d.score.toFixed(2)}</span>
               <span
                 className={`label-action ${isRejected ? "restore" : ""}`}
@@ -703,6 +741,233 @@ function LabelPanel({
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * Per-frame detection-count chart.
+ *
+ * One line per class, x-axis is frame index, y-axis is **kept** count of
+ * detections of that class in that frame (rejections filtered out). A
+ * vertical marker tracks the current frame; clicking anywhere on the chart
+ * seeks to the corresponding frame.
+ *
+ * Why this lives in the Inspector (not the Teachers card): the chart is
+ * useful precisely *because* you can scrub to interesting points — spikes
+ * (cluster of players) or drops (ball off-screen). It's the "step through
+ * to understand" affordance.
+ *
+ * Why kept-only (not raw): during curation you want to see what your
+ * dataset will look like after rejections, not what the detector originally
+ * proposed. Toggling a reject in the side panel makes the chart redraw
+ * immediately, which is useful for spotting "I just nuked the only ball
+ * detection in frame 17" — a draftsman's view of curation impact.
+ *
+ * Implementation notes:
+ *   - Counts are computed client-side from the labels array we already
+ *     loaded for box rendering — no extra fetch.
+ *   - Frames missing from labels are treated as count=0 (matches learn.py:
+ *     every processed frame produces a JSONL line, even empty ones).
+ *   - Classes that exist in raw labels but are *fully rejected* in every
+ *     frame still render in the legend (all-zero line). Keeping them in
+ *     the legend matches expectations — curating away a class shouldn't
+ *     make it vanish from the chart you're using to make decisions.
+ *   - Total frame width may exceed canvas width — we map frame_idx →
+ *     fractional pixel. For 50 frames in a 700px-wide chart this is
+ *     generous; for thousands, the line is a smooth densogram.
+ */
+function PerFrameCountChart({
+  labels,
+  rejections,
+  totalFrames,
+  currentFrame,
+  onSeek,
+}: {
+  labels: PerFrameLabels[];
+  rejections: RejectionMap;
+  totalFrames: number;
+  currentFrame: number;
+  onSeek: (frame: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Build per-class series indexed by frame_idx, plus the legend list. We
+  // keep classes from the *raw* label set so the legend is stable across
+  // curation; series values are kept-only counts.
+  const { classes, series, total, maxCount, totalRejected } = useMemo(() => {
+    const allClasses = new Set<string>();
+    for (const l of labels) {
+      for (const d of l.detections) allClasses.add(d.class_name);
+    }
+    const classes = [...allClasses].sort();
+    const n = Math.max(totalFrames, ...labels.map((l) => l.frame_idx + 1));
+    const series = new Map<string, number[]>();
+    for (const c of classes) series.set(c, new Array(n).fill(0));
+    const total = new Array(n).fill(0);
+    let maxCount = 0;
+    let totalRejected = 0;
+    for (const l of labels) {
+      const idx = l.frame_idx;
+      if (idx < 0 || idx >= n) continue;
+      const rejectedHere = new Set(rejections[String(idx)] ?? []);
+      l.detections.forEach((d, detIdx) => {
+        if (rejectedHere.has(detIdx)) {
+          totalRejected += 1;
+          return; // kept-only series
+        }
+        const arr = series.get(d.class_name);
+        if (arr) arr[idx] += 1;
+        total[idx] += 1;
+      });
+      if (total[idx] > maxCount) maxCount = total[idx];
+    }
+    return { classes, series, total, maxCount, totalRejected };
+  }, [labels, rejections, totalFrames]);
+
+  // Repaint when state changes
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+      canvas.width = cssW * dpr;
+      canvas.height = cssH * dpr;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    // Layout: left padding for the y-axis tick, bottom padding for x ticks
+    const PADL = 24;
+    const PADR = 8;
+    const PADT = 6;
+    const PADB = 14;
+    const W = cssW - PADL - PADR;
+    const H = cssH - PADT - PADB;
+    const n = total.length;
+    if (n === 0 || W <= 0 || H <= 0) return;
+    const yMax = Math.max(1, maxCount); // avoid div/0
+    const xAt = (i: number) => PADL + (i * W) / Math.max(1, n - 1);
+    const yAt = (v: number) => PADT + H - (v / yMax) * H;
+
+    // Faint baseline + max gridlines
+    ctx.strokeStyle = "#e5e7eb";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PADL, PADT + H);
+    ctx.lineTo(PADL + W, PADT + H);
+    ctx.moveTo(PADL, PADT);
+    ctx.lineTo(PADL + W, PADT);
+    ctx.stroke();
+    ctx.fillStyle = "#9ca3af";
+    ctx.font = "10px ui-monospace, Menlo, monospace";
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "right";
+    ctx.fillText(String(yMax), PADL - 4, PADT + 8);
+    ctx.fillText("0", PADL - 4, PADT + H);
+    ctx.textAlign = "start";
+
+    // Per-class lines
+    classes.forEach((cls) => {
+      const arr = series.get(cls);
+      if (!arr) return;
+      ctx.strokeStyle = colorForClass(cls);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < arr.length; i++) {
+        const x = xAt(i);
+        const y = yAt(arr[i]);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    });
+
+    // Current-frame marker
+    if (currentFrame >= 0 && currentFrame < n) {
+      const x = xAt(currentFrame);
+      ctx.strokeStyle = "#111827";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, PADT);
+      ctx.lineTo(x, PADT + H);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Tooltip near the marker: frame N · per-class counts
+      const tipParts: string[] = [`f${currentFrame}`];
+      for (const cls of classes) {
+        const v = series.get(cls)?.[currentFrame] ?? 0;
+        if (v > 0) tipParts.push(`${cls}:${v}`);
+      }
+      const text = tipParts.join("  ");
+      const tw = ctx.measureText(text).width + 10;
+      const tipX = Math.min(PADL + W - tw, Math.max(PADL, x + 4));
+      ctx.fillStyle = "rgba(17,24,39,0.85)";
+      ctx.fillRect(tipX, PADT, tw, 16);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(text, tipX + 5, PADT + 12);
+    }
+  }, [classes, series, total, maxCount, currentFrame]);
+
+  const handleClick = useCallback(
+    (e: ReactMouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const PADL = 24;
+      const PADR = 8;
+      const W = rect.width - PADL - PADR;
+      const x = e.clientX - rect.left - PADL;
+      const n = total.length;
+      if (n === 0 || W <= 0) return;
+      const frac = Math.max(0, Math.min(1, x / W));
+      onSeek(Math.round(frac * (n - 1)));
+    },
+    [onSeek, total.length],
+  );
+
+  return (
+    <div className="frame-chart-row">
+      <div className="frame-chart-legend">
+        <span
+          className="frame-chart-mode"
+          title="Chart shows kept counts — rejected detections are excluded. Toggle a reject in the panel and watch the line move."
+        >
+          kept
+          {totalRejected > 0 && (
+            <span className="frame-chart-rejected-note">
+              {" "}
+              · {totalRejected} rejected hidden
+            </span>
+          )}
+        </span>
+        {classes.map((c) => (
+          <span key={c} className="frame-chart-legend-item">
+            <span
+              className="frame-chart-swatch"
+              style={{ backgroundColor: colorForClass(c) }}
+            />
+            <span className="frame-chart-legend-label">{c}</span>
+          </span>
+        ))}
+      </div>
+      <canvas
+        ref={canvasRef}
+        className="frame-chart"
+        onClick={handleClick}
+        title="Click to jump to that frame"
+      />
     </div>
   );
 }
