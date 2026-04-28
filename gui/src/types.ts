@@ -200,6 +200,10 @@ export interface StudentManifest {
   t_high?: number;
   t_low?: number;
   treat_empty_as_negative?: boolean;
+  /** Trainer architecture (Phase 1.3). Defaulted to "yolov8n" on the
+   *  backend so old manifests without this key load as the only
+   *  architecture that existed before the dispatcher. */
+  architecture?: string;
 }
 
 /** One row of the Student's per-eval-teacher transferability table. */
@@ -278,6 +282,18 @@ export interface OptimizeRequest {
    *  becomes a true negative. Off by default — flip on only when you fully
    *  trust the teacher's "no detection" signal. */
   treat_empty_as_negative?: boolean;
+  /** Trainer architecture (Phase 1.4). Defaulted to "yolov8n" on the
+   *  backend; absent on the wire is treated as the same default. */
+  architecture?: string;
+}
+
+// ---- Architectures list (Phase 1.4) -------------------------------------
+
+/** Response for `GET /students/architectures` — names of every trainer
+ *  registered in `pipeline.students.TRAINERS`. The GUI fetches this once
+ *  on mount to populate the architecture dropdown. */
+export interface ArchitecturesResponse {
+  architectures: string[];
 }
 
 // ---- Bucket preview (Phase 0.4) ------------------------------------------

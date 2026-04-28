@@ -7,6 +7,7 @@ export default function App() {
   const loadVideos = useStore((s) => s.loadVideos);
   const loadTeachers = useStore((s) => s.loadTeachers);
   const loadStudents = useStore((s) => s.loadStudents);
+  const loadArchitectures = useStore((s) => s.loadArchitectures);
 
   useEffect(() => {
     // Initial catalog + run-list pulls. After they settle, re-arm pollers
@@ -17,6 +18,7 @@ export default function App() {
       loadVideos(),
       loadTeachers(),
       loadStudents(),
+      loadArchitectures(),
     ])
       .then(() => {
         const { teacherDetails, studentDetails } = useStore.getState();
@@ -35,7 +37,7 @@ export default function App() {
         }
       })
       .catch((err) => console.error("initial load failed", err));
-  }, [loadBlocks, loadVideos, loadTeachers, loadStudents]);
+  }, [loadBlocks, loadVideos, loadTeachers, loadStudents, loadArchitectures]);
 
   return (
     <div className="app">

@@ -13,6 +13,7 @@ import {
 import {
   deleteRun as apiDeleteRun,
   deleteStudent as apiDeleteStudent,
+  fetchArchitectures,
   fetchBlocks,
   fetchCacheStatus,
   fetchRunDetail,
@@ -67,8 +68,14 @@ interface State {
   blocks: Record<string, string[]>;
   videos: string[];
   dataDir: string;
+  /** Names of every registered Student-trainer architecture (Phase 1.4).
+   *  Fetched once on mount via `loadArchitectures`; drives the GUI's
+   *  architecture <select>. Empty until the fetch resolves — components
+   *  fall back to the spec default ("yolov8n") in that window. */
+  architectures: string[];
   loadBlocks: () => Promise<void>;
   loadVideos: () => Promise<void>;
+  loadArchitectures: () => Promise<void>;
 
   // Graph editor (existing)
   nodes: Node<BlockNodeData>[];
@@ -137,6 +144,7 @@ export const useStore = create<State>((set, get) => ({
   blocks: {},
   videos: [],
   dataDir: "",
+  architectures: [],
 
   async loadBlocks() {
     const resp = await fetchBlocks();
@@ -148,6 +156,16 @@ export const useStore = create<State>((set, get) => ({
   async loadVideos() {
     const resp = await fetchVideos();
     set({ videos: resp.videos, dataDir: resp.data_dir });
+  },
+
+  async loadArchitectures() {
+    // Phase 1.4: pulls `pipeline.students.list_trainers()` from the server
+    // once on mount. The architecture <select> in the New Student form
+    // reads this; when it's empty (fetch failed or hasn't returned yet)
+    // the form falls back to the spec default ("yolov8n") so the user
+    // can still kick off a run.
+    const resp = await fetchArchitectures();
+    set({ architectures: resp.architectures });
   },
 
   // ---- Graph editor (unchanged) ----
