@@ -13,3 +13,5 @@ adapters land.
 # Import order doesn't matter — each module's @register decorators populate
 # the ADAPTERS dict at import time.
 from . import video  # noqa: F401 — Input/opencv, Output/overlay-mp4
+from . import grounding_dino  # noqa: F401 — Detect/groundingdino
+from . import bytetrack  # noqa: F401 — Track/bytetrack
