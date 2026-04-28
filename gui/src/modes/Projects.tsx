@@ -224,10 +224,24 @@ function CreateProjectForm({ onDone }: { onDone: () => void }) {
 
       <label>
         <span>Task</span>
-        <select value={task} onChange={(e) => setTask(e.target.value as Task)}>
-          <option value="detection">Detection</option>
-          <option value="segmentation">Segmentation</option>
-        </select>
+        <div className="task-toggle">
+          <button
+            type="button"
+            className={`task-option ${task === "detection" ? "active" : ""}`}
+            onClick={() => setTask("detection")}
+          >
+            <div className="task-name">Detection</div>
+            <div className="task-desc">Bounding boxes — faster, looser localization.</div>
+          </button>
+          <button
+            type="button"
+            className={`task-option ${task === "segmentation" ? "active" : ""}`}
+            onClick={() => setTask("segmentation")}
+          >
+            <div className="task-name">Segmentation</div>
+            <div className="task-desc">Pixel-level shape — slower, more precise.</div>
+          </button>
+        </div>
       </label>
 
       <label>
