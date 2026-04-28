@@ -47,6 +47,7 @@ from pipeline.students.registry import (
 # them grouped by framework (Ultralytics first; future DINOv3 below) makes
 # the file readable as a "what's wired" inventory.
 from . import yolo  # noqa: F401 — yolov8n / yolov8s / yolov8m
+from . import rtdetr  # noqa: F401 — rtdetr-l (Phase 2.1)
 
 __all__ = [
     "INFERENCE_TIMING_SAMPLES",
