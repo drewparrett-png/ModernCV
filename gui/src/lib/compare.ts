@@ -158,6 +158,70 @@ export function mapColourClass(m: number | null): string {
   return "map-poor";
 }
 
+// ---- 3.4 comparability badges -------------------------------------------
+
+export interface ComparabilityBadge {
+  field: "imgsz" | "device" | "epochs";
+  values: (string | number)[];
+  message: string;
+}
+
+/**
+ * Detect cross-student differences on the three comparability axes called
+ * out in the spec: `imgsz`, `device`, `epochs`. Returns one badge per
+ * field that has more than one distinct value across the selection.
+ *
+ * Empty `device` strings (legacy runs) are skipped — comparing "" vs
+ * "cuda" is a noisy false positive; we'd rather under-warn for legacy
+ * data than spam the user.
+ */
+export function comparabilityBadges(
+  students: { id: string; stats: StudentStats }[],
+): ComparabilityBadge[] {
+  const badges: ComparabilityBadge[] = [];
+  if (students.length < 2) return badges;
+
+  // imgsz
+  const imgszSet = new Set<number>();
+  for (const s of students) imgszSet.add(s.stats.imgsz);
+  if (imgszSet.size > 1) {
+    const values = [...imgszSet].sort((a, b) => a - b);
+    badges.push({
+      field: "imgsz",
+      values,
+      message: `Comparing students with different imgsz (${values.join(", ")}) — latency numbers aren't directly comparable.`,
+    });
+  }
+
+  // device — ignore "" (legacy / not recorded).
+  const deviceSet = new Set<string>();
+  for (const s of students) {
+    if (s.stats.device) deviceSet.add(s.stats.device);
+  }
+  if (deviceSet.size > 1) {
+    const values = [...deviceSet].sort();
+    badges.push({
+      field: "device",
+      values,
+      message: `Mixed devices (${values.join(", ")}) — latency comparison may be misleading.`,
+    });
+  }
+
+  // epochs
+  const epochsSet = new Set<number>();
+  for (const s of students) epochsSet.add(s.stats.epochs);
+  if (epochsSet.size > 1) {
+    const values = [...epochsSet].sort((a, b) => a - b);
+    badges.push({
+      field: "epochs",
+      values,
+      message: `Different training epochs (${values.join(", ")}) — under-trained students may underperform.`,
+    });
+  }
+
+  return badges;
+}
+
 // ---- 3.3 Pareto plot data shape -----------------------------------------
 
 export interface ParetoPoint {

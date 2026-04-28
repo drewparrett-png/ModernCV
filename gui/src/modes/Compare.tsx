@@ -5,10 +5,10 @@
  * Students from the multi-select panel; we render the comparison views
  * below.
  *
+ *   3.4  comparability badges (mismatched imgsz/device/epochs)
  *   3.1  side-by-side details table, sortable, best-per-column highlight
  *   3.2  per-eval-teacher mAP matrix, with optional shared-only filter
  *   3.3  Pareto plot (mAP vs. p50 latency) on Recharts
- *   3.4  comparability badges (next commit)
  *
  * Selection lives in the Zustand store (`compareStudentIds`) so toggling
  * sub-tabs doesn't blow it away. Per spec, *not* persisted across reload.
@@ -31,6 +31,7 @@ import { useStore } from "../store";
 import type { RunDetail, StudentDetail, StudentStats } from "../types";
 import {
   bestPerColumn,
+  comparabilityBadges,
   evalTeacherMatrix,
   mapColourClass,
   paretoPoints,
@@ -277,7 +278,7 @@ function CompareSelector({
   );
 }
 
-// ---- Body (table + matrix + Pareto; badges appended in next commit)
+// ---- Body (badges + table + matrix + Pareto)
 
 function CompareBody({
   selected,
@@ -299,6 +300,7 @@ function CompareBody({
 
   return (
     <div className="compare-body">
+      <ComparabilityBadges students={studentsForHelpers} />
       <DetailsTable selected={selected} students={studentsForHelpers} />
       <EvalTeacherMatrixView
         students={studentsForHelpers}
@@ -307,6 +309,27 @@ function CompareBody({
         onInspectTeacher={onInspectTeacher}
       />
       <ParetoPlot selected={selected} />
+    </div>
+  );
+}
+
+// ---- 3.4 Comparability badges ------------------------------------------
+
+function ComparabilityBadges({
+  students,
+}: {
+  students: { id: string; stats: StudentStats }[];
+}) {
+  const badges = useMemo(() => comparabilityBadges(students), [students]);
+  if (badges.length === 0) return null;
+  return (
+    <div className="compare-badges">
+      {badges.map((b) => (
+        <div key={b.field} className="compare-badge">
+          <span className="compare-badge-icon">⚠</span>
+          <span>{b.message}</span>
+        </div>
+      ))}
     </div>
   );
 }
