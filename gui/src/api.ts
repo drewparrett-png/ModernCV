@@ -4,6 +4,8 @@ import type {
   LearnRequest,
   OptimizeRequest,
   PerFrameLabels,
+  PreviewBucketsRequest,
+  PreviewBucketsResponse,
   RunDetail,
   RunResponse,
   RunsResponse,
@@ -184,4 +186,22 @@ export async function deleteStudent(id: string): Promise<void> {
   if (!res.ok && res.status !== 404) {
     throw new Error(`DELETE /students/${id}: ${res.status}`);
   }
+}
+
+/** Live frame-bucket preview for the New Student form (Phase 0.4).
+ *  Cheap on the backend — reads each teacher's coco.json and runs
+ *  `classify_frames`, no frame extraction. Caller debounces. */
+export async function previewBuckets(
+  req: PreviewBucketsRequest,
+): Promise<PreviewBucketsResponse> {
+  const res = await fetch(`${API_BASE}/students/preview-buckets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST /students/preview-buckets: ${res.status} ${text}`);
+  }
+  return res.json();
 }

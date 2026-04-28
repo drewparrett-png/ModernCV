@@ -16,6 +16,7 @@ Endpoints:
 from __future__ import annotations
 
 import io
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
-from pipeline import model_cache, runs as runs_mod
+from pipeline import distill, model_cache, runs as runs_mod
 from pipeline.graph import GraphSpec
 from pipeline.learn import (
     ensure_learn_worker_started,
@@ -44,6 +45,10 @@ from server.schemas import (
     CacheStatusResponse,
     LearnRequest,
     OptimizeRequest,
+    PreviewBucketsAggregate,
+    PreviewBucketsPerTeacher,
+    PreviewBucketsRequest,
+    PreviewBucketsResponse,
     RejectionsResponse,
     RejectToggleRequest,
     RunDetail,
@@ -480,6 +485,100 @@ def _student_detail(student_id: str) -> StudentDetail:
         manifest=StudentManifestModel(**manifest.__dict__),
         stats=StudentStatsModel(**stats.__dict__) if stats else None,
         progress=RunProgressModel(**progress.__dict__) if progress else None,
+    )
+
+
+@app.post("/students/preview-buckets", response_model=PreviewBucketsResponse)
+def preview_buckets(req: PreviewBucketsRequest) -> PreviewBucketsResponse:
+    """Live frame-bucket preview for the New Student form (Phase 0.4).
+
+    Cheap to call — reads each teacher's `coco.json` once, runs the same
+    `classify_frames` pass `prepare_yolo_dataset` would run, and returns
+    the bucket counts. No frame extraction, no I/O beyond the COCO read.
+
+    Used by the GUI to show "you're about to train on N positive frames,
+    drop M uncertain ones" while the user is still tweaking thresholds.
+    The 250ms client-side debounce + this O(annotations) server pass is
+    fast enough to feel live on every checkbox toggle and slider drag.
+
+    Errors:
+      • t_low > t_high  → 422 via Pydantic validator on PreviewBucketsRequest.
+      • teacher_id missing on disk     → 404 with the offending id.
+      • teacher has no coco.json yet   → 400 (Learn run never finished).
+    """
+    per_teacher: list[PreviewBucketsPerTeacher] = []
+    agg_pos = 0
+    agg_unc = 0
+    agg_neg = 0
+    class_names_union: list[str] = []
+    seen_classes: set[str] = set()
+
+    for tid in req.teacher_ids:
+        tdir = runs_mod.run_dir(tid)
+        if not (tdir / runs_mod.MANIFEST_NAME).exists():
+            raise HTTPException(status_code=404, detail=f"no such teacher: {tid}")
+        coco_path = tdir / runs_mod.LABELS_DIR / runs_mod.COCO_NAME
+        if not coco_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"teacher {tid!r} has no coco.json yet — finish a Learn run first"
+                ),
+            )
+        try:
+            coco = json.loads(coco_path.read_text())
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"teacher {tid!r} coco.json is malformed: {e}",
+            )
+
+        # Same bucket logic the trainer uses, so the preview is honest.
+        # We've already validated t_low <= t_high in the Pydantic model;
+        # classify_frames raises ValueError on inversion which would be
+        # an internal bug at this point.
+        buckets = distill.classify_frames(
+            coco, t_high=req.t_high, t_low=req.t_low,
+        )
+        positive = len(buckets.positive)
+        uncertain = len(buckets.uncertain)
+        true_negative = len(buckets.true_negative)
+
+        # Escape hatch: reclassify uncertain frames as true_negative *before*
+        # reporting counts, to mirror what `prepare_yolo_dataset` would do
+        # at training time. The user-visible "uncertain" then drops to 0
+        # and the negative count grows — exactly what the trainer would see.
+        if req.treat_empty_as_negative:
+            true_negative += uncertain
+            uncertain = 0
+
+        per_teacher.append(
+            PreviewBucketsPerTeacher(
+                teacher_id=tid,
+                positive=positive,
+                uncertain=uncertain,
+                true_negative=true_negative,
+            )
+        )
+        agg_pos += positive
+        agg_unc += uncertain
+        agg_neg += true_negative
+
+        for cat in coco.get("categories", []):
+            cname = cat.get("name")
+            if isinstance(cname, str) and cname not in seen_classes:
+                seen_classes.add(cname)
+                class_names_union.append(cname)
+
+    return PreviewBucketsResponse(
+        aggregate=PreviewBucketsAggregate(
+            positive=agg_pos,
+            uncertain=agg_unc,
+            true_negative=agg_neg,
+            n_classes=len(class_names_union),
+            class_names=class_names_union,
+        ),
+        per_teacher=per_teacher,
     )
 
 
