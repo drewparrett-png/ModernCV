@@ -36,9 +36,15 @@ from pipeline.learn import (
 )
 from pipeline.models.registry import REGISTRY
 from pipeline.optimize import run_optimize_in_background
+# Importing the students package triggers each trainer module's
+# `@register(...)` side effect — we read `list_trainers()` for the
+# `/students/architectures` endpoint so the dropdown is populated by
+# whatever's actually wired today, not a hardcoded list.
+from pipeline.students import list_trainers
 from pipeline.runner import run as run_graph
 from server.schemas import (
     ApproveResponse,
+    ArchitecturesResponse,
     BlockKindInfo,
     BlocksResponse,
     CacheStatusModel,
@@ -461,6 +467,18 @@ def optimize_endpoint(req: OptimizeRequest) -> StudentDetail:
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _student_detail(manifest.id)
+
+
+@app.get("/students/architectures", response_model=ArchitecturesResponse)
+def students_architectures() -> ArchitecturesResponse:
+    """List every registered Student-trainer architecture (Phase 1.4).
+
+    Reads `pipeline.students.list_trainers()` live so newly-wired
+    architectures show up in the GUI without any server-side schema
+    change. The GUI fetches this once on mount and caches it in the
+    Zustand store.
+    """
+    return ArchitecturesResponse(architectures=list_trainers())
 
 
 @app.get("/students", response_model=StudentsResponse)

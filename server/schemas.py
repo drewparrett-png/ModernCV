@@ -339,6 +339,16 @@ class StudentsResponse(BaseModel):
     students: list[StudentManifestModel]
 
 
+class ArchitecturesResponse(BaseModel):
+    """Names of every registered student trainer (Phase 1.4).
+
+    Drives the architecture `<select>` in the New Student form. Sorted
+    so the GUI dropdown order is stable across reloads.
+    """
+
+    architectures: list[str] = Field(default_factory=list)
+
+
 # ---- Preview-buckets endpoint ---------------------------------------------
 
 

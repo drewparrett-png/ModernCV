@@ -1,4 +1,5 @@
 import type {
+  ArchitecturesResponse,
   BlocksResponse,
   GraphSpec,
   LearnRequest,
@@ -186,6 +187,17 @@ export async function deleteStudent(id: string): Promise<void> {
   if (!res.ok && res.status !== 404) {
     throw new Error(`DELETE /students/${id}: ${res.status}`);
   }
+}
+
+/** Names of every registered Student-trainer architecture (Phase 1.4).
+ *  Cheap — reads `pipeline.students.list_trainers()`. Cached in the
+ *  Zustand store after the initial mount fetch. */
+export async function fetchArchitectures(): Promise<ArchitecturesResponse> {
+  const res = await fetch(`${API_BASE}/students/architectures`);
+  if (!res.ok) {
+    throw new Error(`GET /students/architectures: ${res.status}`);
+  }
+  return res.json();
 }
 
 /** Live frame-bucket preview for the New Student form (Phase 0.4).

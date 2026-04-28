@@ -42,6 +42,12 @@ const DEFAULT_T_HIGH = 0.35;
 const DEFAULT_T_LOW = 0.15;
 const PREVIEW_DEBOUNCE_MS = 250;
 
+// Architecture default (Phase 1.4) — mirrors the only architecture that
+// existed before the dispatcher refactor. The fetched `architectures`
+// list from the store may be empty briefly on mount; the dropdown falls
+// back to this single-entry list so the form is still usable.
+const DEFAULT_ARCHITECTURE = "yolov8n";
+
 interface ToolchainStage {
   kind: "detect" | "segment" | "track";
   label: string;
@@ -220,6 +226,13 @@ function NewStudentForm({
   const [trainSet, setTrainSet] = useState<Set<string>>(new Set());
   const [evalSet, setEvalSet] = useState<Set<string>>(new Set());
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+
+  // Architecture selector (Phase 1.4). Default kept in lockstep with the
+  // backend's `OptimizeRequest.architecture` default ("yolov8n") so the
+  // form's initial submission produces the same Student as the pre-1.4
+  // code path.
+  const [architecture, setArchitecture] = useState<string>(DEFAULT_ARCHITECTURE);
+  const architectures = useStore((s) => s.architectures);
 
   // Confidence-band knobs (Phase 0.4). Local string state for the inputs
   // so the user can type a partial value (e.g. "0.") without React
@@ -441,6 +454,36 @@ function NewStudentForm({
         onTreatEmptyAsNegativeChange={setTreatEmptyAsNegative}
       />
 
+      {/* Architecture selector (Phase 1.4). Lives in its own toolchain-row
+          block so it visually matches the detect/track rows below. The
+          options come from `GET /students/architectures`; if that fetch
+          hasn't resolved yet (or failed) we fall back to the single-entry
+          [yolov8n] list so the form is usable in the worst case. */}
+      <div className="toolchain-rows">
+        <div className="toolchain-row">
+          <div className="toolchain-stage">
+            <div className="toolchain-stage-label">Architecture</div>
+            <div className="toolchain-stage-kind">trainer</div>
+          </div>
+          <select
+            value={architecture}
+            onChange={(e) => setArchitecture(e.target.value)}
+          >
+            {(architectures.length > 0
+              ? architectures
+              : [DEFAULT_ARCHITECTURE]
+            ).map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+          <div className="toolchain-impl-help">
+            Backbone + training framework used to fit the Student.
+          </div>
+        </div>
+      </div>
+
       {stages && (
         <div className="toolchain-rows">
           {stages.map((stage) => {
@@ -493,6 +536,7 @@ function NewStudentForm({
               t_high: tHigh,
               t_low: tLow,
               treat_empty_as_negative: treatEmptyAsNegative,
+              architecture,
             });
             // On success, clear the form so the user gets a clean slate
             // for the next Student. Keep selections on failure so they
@@ -507,6 +551,7 @@ function NewStudentForm({
               setTLow(DEFAULT_T_LOW);
               setTreatEmptyAsNegative(false);
               setAdvancedOpen(false);
+              setArchitecture(DEFAULT_ARCHITECTURE);
             }
           }}
         >
@@ -582,6 +627,16 @@ function SelectedStudent({
             {Object.entries(manifest.models)
               .map(([k, v]) => `${k}=${v}`)
               .join("  ·  ")}
+          </span>
+        </div>
+        {/* Architecture row (Phase 1.4). Old manifests predate this field;
+            fall back to "yolov8n" — the only architecture that existed
+            before the dispatcher refactor — so legacy runs still render a
+            sensible value rather than "undefined". */}
+        <div className="result-row">
+          <span className="result-key">Architecture</span>
+          <span className="result-value mono">
+            {manifest.architecture ?? "yolov8n"}
           </span>
         </div>
         {stats && stats.epochs > 0 && (
