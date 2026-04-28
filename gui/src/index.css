@@ -1513,6 +1513,19 @@ html, body, #root {
   padding: 4px 0 0;
 }
 
+/* Per-train-teacher bucket table (Phase 0.5).
+ * Reuses `.per-eval-table` for the chrome but overrides the grid template
+ * — three numeric columns of equal width instead of the eval table's
+ * Images / mAP / mAP@0.5:0.95 mix. Slightly tighter top margin since this
+ * table sits *under* the eval table in the same card. */
+.per-train-bucket-table {
+  margin-top: 12px;
+}
+.per-train-bucket-head,
+.per-train-bucket-row {
+  grid-template-columns: 1fr 90px 90px 90px;
+}
+
 /* ---- VideoTreePicker — folder-tree picker for data/ -------------------- */
 
 .video-picker {
@@ -1693,4 +1706,130 @@ html, body, #root {
  * z-index keeps the panel above sibling nodes. */
 .block-node .video-picker-panel {
   min-width: 320px;
+}
+
+/* ---- Optimize / NewStudentForm: bucket preview + Advanced panel ----------
+ * The two visual surfaces added in Phase 0.4. The preview line is high
+ * priority — it's what the user reads to know what they're about to train
+ * on — so it gets a tinted info-style background. The Advanced panel
+ * defers visibility until opened and uses muted backgrounds since it's
+ * for power users.
+ */
+.bucket-preview {
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.bucket-preview strong { color: #1e3a8a; }
+
+.bucket-preview-empty {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #6b7280;
+}
+.bucket-preview-empty strong { color: #374151; }
+
+.bucket-preview-loading {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.bucket-preview-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.advanced-panel {
+  margin: 8px 0 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.advanced-toggle {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+  color: #374151;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.advanced-toggle:hover { background: #f3f4f6; }
+
+.advanced-toggle-caret {
+  display: inline-block;
+  width: 12px;
+  color: #9ca3af;
+}
+
+.advanced-toggle-summary {
+  margin-left: auto;
+  font-size: 11px;
+  color: #6b7280;
+  font-family: ui-monospace, monospace;
+}
+
+.advanced-panel-body {
+  padding: 8px 12px 12px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.advanced-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.advanced-row-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #374151;
+}
+
+.advanced-row-name {
+  min-width: 200px;
+  font-size: 12px;
+  color: #111827;
+}
+
+.advanced-row input[type="number"] {
+  width: 96px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.advanced-row input[type="number"][aria-invalid="true"] {
+  border-color: #f87171;
+  background: #fef2f2;
+}
+
+.advanced-row-help {
+  font-size: 11px;
+  color: #6b7280;
+  margin-left: 4px;
+}
+
+.learn-hint-warn {
+  color: #92400e;
 }

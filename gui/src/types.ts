@@ -194,6 +194,12 @@ export interface StudentManifest {
   status: "running" | "completed" | "failed";
   models: Record<string, string>;
   error: string | null;
+  // Confidence-band thresholds carried from the OptimizeRequest. Defaulted
+  // on the backend so old manifests without these keys still load — the
+  // GUI treats absent fields as the spec defaults too.
+  t_high?: number;
+  t_low?: number;
+  treat_empty_as_negative?: boolean;
 }
 
 /** One row of the Student's per-eval-teacher transferability table. */
@@ -205,6 +211,14 @@ export interface PerEvalTeacherStat {
   map50_95: number;
   /** Set when the trainer skipped this teacher (missing source video, etc.). */
   error?: string;
+}
+
+/** One row of the Student's per-train-teacher frame-bucket breakdown. */
+export interface PerTrainTeacherBucket {
+  teacher_id: string;
+  positive: number;
+  uncertain: number;
+  true_negative: number;
 }
 
 export interface StudentStats {
@@ -220,6 +234,17 @@ export interface StudentStats {
   p95_inference_ms: number;
   model_size_mb: number;
   per_eval_teacher: PerEvalTeacherStat[];
+  // ---- frame-bucket breakdown (Phase 0.5/0.6) --------------------------
+  // Defaulted to safe values on the backend so old stats.json files keep
+  // loading; the GUI renders an em-dash when `per_teacher_buckets` is
+  // empty (legacy run, no breakdown was captured).
+  n_positive_frames: number;
+  n_uncertain_dropped: number;
+  n_true_negative_frames: number;
+  per_teacher_buckets: PerTrainTeacherBucket[];
+  t_high: number;
+  t_low: number;
+  treat_empty_as_negative: boolean;
 }
 
 export interface StudentDetail {
@@ -241,4 +266,46 @@ export interface OptimizeRequest {
   segment_impl?: string;
   track_impl?: string;
   epochs?: number;
+  /** Confidence floor for "this annotation becomes a YOLO label". Detections
+   *  with score ≥ t_high promote their frame to *positive* and survive the
+   *  per-annotation min_score filter at YOLO-label-write time. Default 0.35. */
+  t_high?: number;
+  /** Frames whose only detections sit in [t_low, t_high) are *uncertain* —
+   *  the teacher saw something but wasn't sure. Dropped entirely from
+   *  training unless treat_empty_as_negative is on. Default 0.15. */
+  t_low?: number;
+  /** Reproduces pre-Phase-0 behaviour: every zero/below-t_low-only frame
+   *  becomes a true negative. Off by default — flip on only when you fully
+   *  trust the teacher's "no detection" signal. */
+  treat_empty_as_negative?: boolean;
+}
+
+// ---- Bucket preview (Phase 0.4) ------------------------------------------
+
+export interface PreviewBucketsRequest {
+  teacher_ids: string[];
+  t_high?: number;
+  t_low?: number;
+  treat_empty_as_negative?: boolean;
+}
+
+export interface PreviewBucketsAggregate {
+  positive: number;
+  uncertain: number;
+  true_negative: number;
+  n_classes: number;
+  /** Class-name union across the selected teachers, in first-seen order. */
+  class_names: string[];
+}
+
+export interface PreviewBucketsPerTeacher {
+  teacher_id: string;
+  positive: number;
+  uncertain: number;
+  true_negative: number;
+}
+
+export interface PreviewBucketsResponse {
+  aggregate: PreviewBucketsAggregate;
+  per_teacher: PreviewBucketsPerTeacher[];
 }

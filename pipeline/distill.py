@@ -42,7 +42,7 @@ import random
 import shutil
 import time
 from contextlib import redirect_stdout, redirect_stderr
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -85,6 +85,90 @@ class DatasetSummary:
     n_train_annotations: int
     n_val_images: int
     class_names: list[str]
+    # Confidence-band bucket counts (Phase 0.3). Defaulted so test code or
+    # callers that don't care about bucketing still construct cleanly.
+    n_positive_frames: int = 0
+    n_uncertain_dropped: int = 0
+    n_true_negative_frames: int = 0
+    # Per-train-teacher bucket breakdown:
+    # [{"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int}, ...]
+    per_teacher_buckets: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class FrameBuckets:
+    """Per-frame confidence-band classification for one teacher's COCO.
+
+    Frames are bucketed by the teacher's *highest* per-frame detection
+    score:
+
+      • `positive`      — at least one annotation with score ≥ t_high.
+                          Frame is kept; low-score boxes on it get
+                          dropped at YOLO-label time (`min_score=t_high`).
+      • `uncertain`     — every annotation is in `[t_low, t_high)` (and
+                          there's at least one). Teacher had something
+                          to say but wasn't confident enough to commit.
+                          These frames are dropped entirely from training
+                          unless `treat_empty_as_negative=True`.
+      • `true_negative` — no annotations at all, OR every annotation is
+                          strictly below `t_low`. Strongest "really
+                          empty" signal — kept as a YOLO empty .txt.
+
+    Frame ids are the COCO image ids (== source video frame index, by
+    convention in this project).
+    """
+
+    positive: list[int] = field(default_factory=list)
+    uncertain: list[int] = field(default_factory=list)
+    true_negative: list[int] = field(default_factory=list)
+
+
+def classify_frames(coco: dict, *, t_high: float, t_low: float) -> FrameBuckets:
+    """Pure helper: bucket every frame in a COCO dict by teacher confidence.
+
+    Reused by the trainer (Phase 0.3) and the GUI preview endpoint (Phase
+    0.4). No I/O, no numpy — small enough to run on every keystroke in
+    the GUI.
+
+    Bucket rules (match the dataclass docstring exactly):
+      • `positive`: any ann score ≥ t_high.
+      • `uncertain`: at least one ann in [t_low, t_high) AND no ann
+        ≥ t_high.
+      • `true_negative`: no annotations OR all anns < t_low.
+
+    Annotations missing a `score` key are treated as score=1.0 (same
+    convention as `_coco_to_yolo_lines`).
+    """
+    if t_low > t_high:
+        raise ValueError(
+            f"t_low ({t_low}) must be <= t_high ({t_high}) — "
+            "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+        )
+
+    # Index annotations by image id so each frame's verdict is one pass.
+    anns_by_image: dict[int, list[dict]] = {}
+    for ann in coco.get("annotations", []):
+        anns_by_image.setdefault(int(ann["image_id"]), []).append(ann)
+
+    buckets = FrameBuckets()
+    for img in coco.get("images", []):
+        frame_id = int(img["id"])
+        anns = anns_by_image.get(frame_id, [])
+        if not anns:
+            buckets.true_negative.append(frame_id)
+            continue
+        scores = [float(a.get("score", 1.0)) for a in anns]
+        max_score = max(scores)
+        if max_score >= t_high:
+            buckets.positive.append(frame_id)
+        elif max_score >= t_low:
+            # At least one ann sits in [t_low, t_high) and none cross t_high.
+            buckets.uncertain.append(frame_id)
+        else:
+            # Every ann is strictly below t_low — teacher tried, came up
+            # with nothing convincing. Strongest "really empty" signal.
+            buckets.true_negative.append(frame_id)
+    return buckets
 
 
 def _read_teacher_coco(teacher_id: str) -> tuple[dict, str]:
@@ -153,6 +237,7 @@ def _coco_to_yolo_lines(
     img_w: int,
     img_h: int,
     coco_to_global: dict[int, int],
+    min_score: float = 0.0,
 ) -> list[str]:
     """Convert COCO annotations (x,y,w,h in pixels) to YOLO's normalized
     `class cx cy w h` (all in [0,1]).
@@ -163,6 +248,11 @@ def _coco_to_yolo_lines(
     vocabulary) are dropped silently — that only happens when called for
     an eval teacher whose vocab is a superset of train's, and the trainer
     already logged a warning in that case.
+
+    `min_score` filters annotations by `ann["score"]`. Default 0.0
+    preserves prior behaviour (no filtering). Annotations missing a
+    `score` key are treated as score=1.0 so future user-added labels (no
+    teacher-confidence attached) pass through unchanged.
     """
     if img_w <= 0 or img_h <= 0:
         return []
@@ -170,6 +260,8 @@ def _coco_to_yolo_lines(
     for ann in annotations:
         cat = ann.get("category_id")
         if cat not in coco_to_global:
+            continue
+        if float(ann.get("score", 1.0)) < min_score:
             continue
         x, y, w, h = ann["bbox"]
         # COCO bbox can occasionally be slightly out of image due to int
@@ -219,6 +311,9 @@ def prepare_yolo_dataset(
     *,
     student_dir: Path,
     train_teacher_ids: list[str],
+    t_high: float = 0.35,
+    t_low: float = 0.15,
+    treat_empty_as_negative: bool = False,
     split_ratio: float = DEFAULT_TRAIN_VAL_SPLIT,
     seed: int = 42,
     progress: Optional[Callable[[str, int, int], None]] = None,
@@ -227,9 +322,44 @@ def prepare_yolo_dataset(
 
     Each train teacher contributes its frames + curated annotations; we
     union the class vocabularies and split each teacher's frames 80/20
-    train/val. `progress` callback receives (stage_message, current,
-    total) so the worker can write a live progress.json.
+    train/val.
+
+    Frame bucketing (Phase 0.3)
+    ---------------------------
+    Per teacher, every frame is classified by its highest detection
+    score:
+
+      • `positive`      (max score ≥ t_high)   — extracted, labelled
+        with `_coco_to_yolo_lines(min_score=t_high)` so low-confidence
+        boxes on otherwise-good frames don't leak into the training set.
+      • `uncertain`     (max in [t_low, t_high)) — *dropped entirely*.
+        No frame extraction, no label file. The teacher saw something
+        but wasn't sure, and using these as either positive *or*
+        negative training examples both bias the student.
+      • `true_negative` (no anns OR max < t_low) — extracted with an
+        empty `.txt`. This is the "really empty" signal — the teacher
+        either didn't fire at all or fired only on noise.
+
+    `treat_empty_as_negative=True` is the opt-in escape hatch for users
+    who trust their teacher: uncertain frames are reclassified to
+    `true_negative` *before* extraction, so the trainer sees the same
+    set of frames it did before the bucketing change. Combined with the
+    `min_score=t_high` filter on positive labels, this reproduces the
+    old training set exactly *as long as the teacher's confidence
+    threshold at Learn time was already ≥ t_high* (which is the typical
+    case — GroundingDINO's default `box_threshold` is 0.25-0.30, well
+    above the default `t_low=0.15`, so no detections fall in the
+    uncertain band in the first place).
+
+    `progress` callback receives (stage_message, current, total) so the
+    worker can write a live progress.json.
     """
+    if t_low > t_high:
+        raise ValueError(
+            f"t_low ({t_low}) must be <= t_high ({t_high}); "
+            "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+        )
+
     rng = random.Random(seed)
     class_names, per_teacher_map = _merge_class_vocabs(train_teacher_ids)
     if not class_names:
@@ -249,6 +379,12 @@ def prepare_yolo_dataset(
     n_val_imgs = 0
     n_train_anns = 0
 
+    # Aggregate bucket counts surfaced on DatasetSummary → StudentStats.
+    n_positive_total = 0
+    n_uncertain_dropped_total = 0
+    n_true_negative_total = 0
+    per_teacher_buckets: list[dict] = []
+
     for tid in train_teacher_ids:
         coco, video_path = _read_teacher_coco(tid)
         cat_map = per_teacher_map[tid]
@@ -257,11 +393,54 @@ def prepare_yolo_dataset(
         for ann in coco.get("annotations", []):
             anns_by_image.setdefault(int(ann["image_id"]), []).append(ann)
 
+        # Bucket the teacher's frames. The breakdown is reported even
+        # when treat_empty_as_negative=True so the user sees what would
+        # have been dropped by the strict policy.
+        buckets = classify_frames(coco, t_high=t_high, t_low=t_low)
+        n_positive = len(buckets.positive)
+        n_uncertain = len(buckets.uncertain)
+        n_true_negative = len(buckets.true_negative)
+
+        per_teacher_buckets.append({
+            "teacher_id": tid,
+            "positive": n_positive,
+            "uncertain": n_uncertain,
+            "true_negative": n_true_negative,
+        })
+
+        # Effective bucketing for this run: in escape-hatch mode the
+        # uncertain frames join true_negative before extraction. We
+        # don't mutate `buckets` itself so the GUI gets the strict
+        # numbers in the per-teacher breakdown.
+        if treat_empty_as_negative:
+            extract_positive = list(buckets.positive)
+            extract_true_neg = list(buckets.true_negative) + list(buckets.uncertain)
+            n_uncertain_dropped_total += 0  # nothing dropped this mode
+        else:
+            extract_positive = list(buckets.positive)
+            extract_true_neg = list(buckets.true_negative)
+            n_uncertain_dropped_total += n_uncertain
+
+        n_positive_total += n_positive
+        n_true_negative_total += n_true_negative
+
+        # Frames the trainer actually sees (set, for fast lookup later).
+        kept_frames = set(extract_positive) | set(extract_true_neg)
+
+        # Build the index map needed for split assignment. Iterate
+        # `images` in original COCO order so the val split is reproducible
+        # for a given seed regardless of which buckets got dropped.
         images = coco.get("images", [])
+        kept_images = [img for img in images if int(img["id"]) in kept_frames]
+        if not kept_images:
+            # Teacher contributed nothing — skip extraction; aggregate
+            # counts already reflect this.
+            continue
+
         # Shuffle once per teacher so the val split isn't all the
         # last-frames-of-the-clip (which would skew toward late-game
         # state on soccer footage).
-        order = list(range(len(images)))
+        order = list(range(len(kept_images)))
         rng.shuffle(order)
         cut = int(len(order) * split_ratio)
         train_idx = set(order[:cut])
@@ -269,7 +448,7 @@ def prepare_yolo_dataset(
         # Plan frame extraction for both splits in one cv2 pass.
         out_paths: dict[int, Path] = {}
         per_image_split: dict[int, str] = {}
-        for i, img in enumerate(images):
+        for i, img in enumerate(kept_images):
             frame_idx = int(img["id"])
             split = "train" if i in train_idx else "val"
             per_image_split[frame_idx] = split
@@ -277,7 +456,7 @@ def prepare_yolo_dataset(
             out_paths[frame_idx] = sub / f"frame_{frame_idx:06d}.jpg"
 
         if progress:
-            progress(f"Extracting {len(images)} frames from {tid}", 0, len(images))
+            progress(f"Extracting {len(kept_images)} frames from {tid}", 0, len(kept_images))
 
         def _frame_progress(cur: int, tot: int, _tid: str = tid) -> None:
             if progress:
@@ -290,8 +469,10 @@ def prepare_yolo_dataset(
             progress=_frame_progress,
         )
 
+        positive_set = set(extract_positive)
+
         # Now write the YOLO label files alongside each extracted frame.
-        for img in images:
+        for img in kept_images:
             frame_idx = int(img["id"])
             split = per_image_split[frame_idx]
             label_root = labels_train if split == "train" else labels_val
@@ -304,16 +485,31 @@ def prepare_yolo_dataset(
                 # Frame was unreadable — skip both image + label.
                 continue
 
-            anns = anns_by_image.get(frame_idx, [])
-            lines = _coco_to_yolo_lines(
-                anns,
-                img_w=int(img.get("width") or 0),
-                img_h=int(img.get("height") or 0),
-                coco_to_global=cat_map,
-            )
-            # Empty file is the YOLO convention for "this is a negative
-            # frame, no objects" — it still contributes a precision signal
-            # during training because false-positives on it count.
+            if frame_idx in positive_set:
+                # Positive frame — write filtered labels. Any teacher
+                # detection below `t_high` is a low-confidence box on an
+                # otherwise good frame; dropping it keeps the label set
+                # honest at the cost of a few real positives slipping
+                # through as background. The classify_frames bucketing
+                # already guaranteed there's at least one ann ≥ t_high
+                # so the resulting line list is non-empty in the normal
+                # case.
+                anns = anns_by_image.get(frame_idx, [])
+                lines = _coco_to_yolo_lines(
+                    anns,
+                    img_w=int(img.get("width") or 0),
+                    img_h=int(img.get("height") or 0),
+                    coco_to_global=cat_map,
+                    min_score=t_high,
+                )
+            else:
+                # True negative (or escape-hatch reclassified uncertain) —
+                # genuine background. YOLO convention: empty .txt means
+                # "this frame contains no objects". Still useful at train
+                # time because false-positive predictions count against
+                # precision.
+                lines = []
+
             label_path.write_text("\n".join(lines))
 
             if split == "train":
@@ -363,6 +559,10 @@ def prepare_yolo_dataset(
         n_train_annotations=n_train_anns,
         n_val_images=n_val_imgs,
         class_names=class_names,
+        n_positive_frames=n_positive_total,
+        n_uncertain_dropped=n_uncertain_dropped_total,
+        n_true_negative_frames=n_true_negative_total,
+        per_teacher_buckets=per_teacher_buckets,
     )
 
 

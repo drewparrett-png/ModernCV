@@ -121,6 +121,9 @@ def run_optimize_in_background(
     segment_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     epochs: int = 50,
+    t_high: float = 0.35,
+    t_low: float = 0.15,
+    treat_empty_as_negative: bool = False,
     runs_root: Path = runs_mod.RUNS_DIR,
 ) -> runs_mod.StudentManifest:
     """Allocate a Student dir, return its manifest, run training on a
@@ -179,6 +182,9 @@ def run_optimize_in_background(
         task=task,
         prompt=display_prompt,
         models=models,
+        t_high=t_high,
+        t_low=t_low,
+        treat_empty_as_negative=treat_empty_as_negative,
         runs_root=runs_root,
     )
 
@@ -199,6 +205,9 @@ def run_optimize_in_background(
                 eval_teacher_ids=eval_teacher_ids,
                 task=task,
                 epochs=epochs,
+                t_high=t_high,
+                t_low=t_low,
+                treat_empty_as_negative=treat_empty_as_negative,
             )
         except Exception as e:
             log.exception("optimize worker crashed: %s", e)
@@ -246,6 +255,9 @@ def _run_distillation(
     eval_teacher_ids: list[str],
     task: str,
     epochs: int,
+    t_high: float = 0.35,
+    t_low: float = 0.15,
+    treat_empty_as_negative: bool = False,
 ) -> None:
     """Drive the four phases (prep → train → eval → time) and persist stats.
 
@@ -277,6 +289,9 @@ def _run_distillation(
     summary = distill.prepare_yolo_dataset(
         student_dir=rdir,
         train_teacher_ids=train_teacher_ids,
+        t_high=t_high,
+        t_low=t_low,
+        treat_empty_as_negative=treat_empty_as_negative,
         progress=_prep_progress,
     )
     log.info(
@@ -385,6 +400,17 @@ def _run_distillation(
         p95_inference_ms=p95_ms,
         model_size_mb=distill.model_size_mb(weights),
         per_eval_teacher=per_eval,
+        # Phase 0.5/0.6 — frame-bucket breakdown copied from the prep
+        # summary plus the thresholds we used. Stamping the thresholds
+        # here means the detail card can render the bucket counts in
+        # context without re-reading the manifest.
+        n_positive_frames=summary.n_positive_frames,
+        n_uncertain_dropped=summary.n_uncertain_dropped,
+        n_true_negative_frames=summary.n_true_negative_frames,
+        per_teacher_buckets=summary.per_teacher_buckets,
+        t_high=t_high,
+        t_low=t_low,
+        treat_empty_as_negative=treat_empty_as_negative,
     )
     runs_mod.mark_student_completed(rdir, stats)
     log.info(

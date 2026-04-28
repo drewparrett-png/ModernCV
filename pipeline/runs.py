@@ -100,6 +100,26 @@ class RunStats:
 
     Optional sub-stats (per-block timing, per-class counts) can be added
     over time without breaking older readers — keep new fields optional.
+
+    Detection breakdown
+    -------------------
+    `detections_per_class`: nested dict, one entry per class_name. Shape:
+        {
+          "soccer ball": {
+            "n_detections": 18,                # total dets of this class
+            "frames_present": 12,              # frames with ≥1 of this class
+            "max_in_frame": 3,                 # most of this class in one frame
+            "avg_per_frame": 0.36,             # n_detections / frames_processed
+            "avg_per_present_frame": 1.5,      # n_detections / frames_present
+            "score_avg": 0.42,                 # mean confidence across all dets
+            "score_p50": 0.38,                 # median confidence
+          },
+          "player": { ... }
+        }
+    `per_frame_count_*` describe the distribution of *total* detections per
+    frame (across all classes) — answers "how many objects do we typically
+    find in a frame?".
+    `per_frame_count_histogram`: count (as string key for JSON) → frames.
     """
 
     frames_processed: int = 0
@@ -109,6 +129,15 @@ class RunStats:
     p50_ms_per_frame: float = 0.0
     p95_ms_per_frame: float = 0.0
     n_detections_total: int = 0
+
+    # ---- detection breakdown (added phase 1) ------------------------------
+    detections_per_class: dict[str, dict] = field(default_factory=dict)
+    per_frame_count_min: int = 0
+    per_frame_count_p50: int = 0
+    per_frame_count_p95: int = 0
+    per_frame_count_max: int = 0
+    per_frame_count_avg: float = 0.0
+    per_frame_count_histogram: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -152,6 +181,14 @@ class StudentManifest:
     status: str = "running"  # "running" | "completed" | "failed"
     models: dict[str, str] = field(default_factory=dict)
     error: Optional[str] = None
+    # Confidence-band thresholds used to bucket frames at training time.
+    # Persisted on the manifest so the run is reproducible from manifest.json
+    # alone — i.e. someone reading the file later can answer "what filter
+    # produced this Student's training set?" without grepping logs. All
+    # defaulted so older manifests without these keys still load.
+    t_high: float = 0.35
+    t_low: float = 0.15
+    treat_empty_as_negative: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -186,6 +223,21 @@ class StudentStats:
     # Per-eval-teacher breakdown. Each entry: {teacher_id, n_images,
     # n_annotations, map50, map50_95}. Empty list = no eval teachers.
     per_eval_teacher: list[dict[str, Any]] = field(default_factory=list)
+    # ---- Phase 0.5/0.6 frame-bucket breakdown ----------------------------
+    # All defaulted to safe values so existing stats.json files (no
+    # bucketing fields) keep loading without a migration script.
+    n_positive_frames: int = 0
+    n_uncertain_dropped: int = 0
+    n_true_negative_frames: int = 0
+    # One entry per train teacher:
+    # {"teacher_id": str, "positive": int, "uncertain": int, "true_negative": int}
+    per_teacher_buckets: list[dict[str, Any]] = field(default_factory=list)
+    # Thresholds the trainer actually used. Stamped on the stats so the
+    # detail card can render "frame buckets at t_high=0.35, t_low=0.15"
+    # without re-reading the manifest.
+    t_high: float = 0.35
+    t_low: float = 0.15
+    treat_empty_as_negative: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -503,6 +555,9 @@ def create_student(
     task: str,
     prompt: str,
     models: dict[str, str],
+    t_high: float = 0.35,
+    t_low: float = 0.15,
+    treat_empty_as_negative: bool = False,
     runs_root: Path = RUNS_DIR,
 ) -> tuple[Path, StudentManifest]:
     """Allocate a fresh Student dir + initial 'running' manifest.
@@ -515,6 +570,10 @@ def create_student(
     is meaningless. `eval_teacher_ids` may be empty, in which case the
     Student is trained but not evaluated for transferability (the trainer
     will skip the held-out mAP step).
+
+    The confidence-band thresholds (`t_high`, `t_low`,
+    `treat_empty_as_negative`) are recorded on the manifest at creation
+    time so the run is reproducible from manifest.json alone.
     """
     if not train_teacher_ids:
         raise ValueError("train_teacher_ids must contain at least one teacher")
@@ -531,6 +590,9 @@ def create_student(
         prompt=prompt,
         started_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         models=models,
+        t_high=t_high,
+        t_low=t_low,
+        treat_empty_as_negative=treat_empty_as_negative,
     )
     write_student_manifest(rdir, manifest)
     log.info(
@@ -604,6 +666,142 @@ def detection_to_dict(det: Any) -> dict:
         "class_id": int(det.class_id),
         "class_name": det.class_name,
     }
+
+
+# ---- Detection-breakdown statistics ---------------------------------------
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Nearest-rank percentile on a *pre-sorted* list. Returns 0.0 on empty.
+
+    We use the same convention as the existing p50/p95 timing code in
+    learn.py (`sorted_ms[min(n - 1, int(n * 0.95))]`) so timing and detection
+    percentiles agree on edge cases.
+    """
+    if not sorted_values:
+        return 0.0
+    n = len(sorted_values)
+    idx = min(n - 1, int(n * q))
+    return float(sorted_values[idx])
+
+
+def compute_detection_breakdown(
+    per_frame_records: Iterable[dict],
+    *,
+    frames_processed: Optional[int] = None,
+) -> dict[str, Any]:
+    """Compute per-class counts + per-frame count distribution.
+
+    Single source of truth — used by `learn.py` to fill in stats during a
+    fresh run, and by `recompute_stats` to backfill older runs from
+    `labels/per_frame.jsonl`.
+
+    Parameters
+    ----------
+    per_frame_records:
+        Iterable of dicts with shape `{"frame_idx": int, "detections": [...]}`.
+        Detections need `class_name` and `score`.
+    frames_processed:
+        Total frame count to use in the `avg_per_frame` denominator. If
+        omitted, we count records as they're consumed. Pass this explicitly
+        when the run skipped frames with zero detections (none currently do,
+        but the field-level signal is cleaner this way).
+
+    Returns
+    -------
+    A dict ready to be merged into RunStats kwargs.
+    """
+    # Per-class accumulators
+    per_class_counts: dict[str, int] = {}
+    per_class_frames_present: dict[str, int] = {}
+    per_class_max_in_frame: dict[str, int] = {}
+    per_class_scores: dict[str, list[float]] = {}
+
+    # Per-frame total-count series (for percentiles + histogram)
+    per_frame_total: list[int] = []
+    histogram: dict[int, int] = {}
+
+    n_frames = 0
+    for rec in per_frame_records:
+        n_frames += 1
+        dets = rec.get("detections", []) or []
+        per_frame_total.append(len(dets))
+        histogram[len(dets)] = histogram.get(len(dets), 0) + 1
+
+        # Per-class slice for *this* frame
+        per_frame_class: dict[str, int] = {}
+        for d in dets:
+            cls = d.get("class_name") or f"class_{d.get('class_id', '?')}"
+            per_class_counts[cls] = per_class_counts.get(cls, 0) + 1
+            per_frame_class[cls] = per_frame_class.get(cls, 0) + 1
+            score = d.get("score")
+            if score is not None:
+                per_class_scores.setdefault(cls, []).append(float(score))
+
+        for cls, c in per_frame_class.items():
+            per_class_frames_present[cls] = per_class_frames_present.get(cls, 0) + 1
+            if c > per_class_max_in_frame.get(cls, 0):
+                per_class_max_in_frame[cls] = c
+
+    if frames_processed is None:
+        frames_processed = n_frames
+    denom_frames = max(1, frames_processed)
+
+    # Build per-class summary dict
+    detections_per_class: dict[str, dict] = {}
+    for cls, n in per_class_counts.items():
+        scores = sorted(per_class_scores.get(cls, []))
+        present = per_class_frames_present.get(cls, 0)
+        detections_per_class[cls] = {
+            "n_detections": int(n),
+            "frames_present": int(present),
+            "max_in_frame": int(per_class_max_in_frame.get(cls, 0)),
+            "avg_per_frame": float(n) / denom_frames,
+            "avg_per_present_frame": (float(n) / present) if present else 0.0,
+            "score_avg": (sum(scores) / len(scores)) if scores else 0.0,
+            "score_p50": _percentile(scores, 0.5),
+        }
+
+    # Per-frame distribution
+    sorted_counts = sorted(per_frame_total)
+    if sorted_counts:
+        avg_count = sum(sorted_counts) / len(sorted_counts)
+        cmin = int(sorted_counts[0])
+        cmax = int(sorted_counts[-1])
+        cp50 = int(_percentile(sorted_counts, 0.5))
+        cp95 = int(_percentile(sorted_counts, 0.95))
+    else:
+        avg_count = 0.0
+        cmin = cmax = cp50 = cp95 = 0
+
+    # JSON keys must be strings — coerce histogram keys
+    hist_str: dict[str, int] = {str(k): int(v) for k, v in sorted(histogram.items())}
+
+    return {
+        "detections_per_class": detections_per_class,
+        "per_frame_count_min": cmin,
+        "per_frame_count_p50": cp50,
+        "per_frame_count_p95": cp95,
+        "per_frame_count_max": cmax,
+        "per_frame_count_avg": float(avg_count),
+        "per_frame_count_histogram": hist_str,
+    }
+
+
+def read_per_frame(rdir: Path) -> Iterable[dict]:
+    """Yield parsed records from `labels/per_frame.jsonl`. Skips blank lines."""
+    p = rdir / LABELS_DIR / PER_FRAME_NAME
+    if not p.exists():
+        return
+    with p.open("r") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as e:  # pragma: no cover — corrupt line
+                log.warning("skipping malformed line in %s: %s", p, e)
 
 
 # ---- COCO export -----------------------------------------------------------

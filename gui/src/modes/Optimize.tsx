@@ -23,10 +23,24 @@
  * happens because it inflates apparent transferability.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
 import { implMeta } from "../blockMeta";
-import type { OptimizeRequest, RunDetail, StudentDetail, Task } from "../types";
+import { previewBuckets } from "../api";
+import type {
+  OptimizeRequest,
+  PreviewBucketsResponse,
+  RunDetail,
+  StudentDetail,
+  Task,
+} from "../types";
+
+// Confidence-band defaults — keep in lockstep with `OptimizeRequest`'s
+// backend defaults (`server/schemas.py`) so the form's initial submission
+// is a no-op against the backend's default behaviour.
+const DEFAULT_T_HIGH = 0.35;
+const DEFAULT_T_LOW = 0.15;
+const PREVIEW_DEBOUNCE_MS = 250;
 
 interface ToolchainStage {
   kind: "detect" | "segment" | "track";
@@ -207,6 +221,23 @@ function NewStudentForm({
   const [evalSet, setEvalSet] = useState<Set<string>>(new Set());
   const [overrides, setOverrides] = useState<Record<string, string>>({});
 
+  // Confidence-band knobs (Phase 0.4). Local string state for the inputs
+  // so the user can type a partial value (e.g. "0.") without React
+  // immediately snapping it back to a number — we coerce on commit.
+  const [tHigh, setTHigh] = useState<number>(DEFAULT_T_HIGH);
+  const [tLow, setTLow] = useState<number>(DEFAULT_T_LOW);
+  const [treatEmptyAsNegative, setTreatEmptyAsNegative] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // Preview state — kept separate from the form values so a stale request
+  // (slow network) doesn't overwrite a fresher one. We compare seq numbers
+  // before committing.
+  const [preview, setPreview] = useState<PreviewBucketsResponse | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewSeqRef = useRef(0);
+
+  const thresholdsValid = tLow <= tHigh;
+
   // The Student's task is fixed to the first Train teacher's task. The
   // Eval set can technically include any task (warning surfaces below);
   // the toolchain UI follows the Train task.
@@ -243,6 +274,49 @@ function NewStudentForm({
     else next.add(id);
     setter(next);
   };
+
+  // Debounced live preview. Re-fires whenever the train teacher set or the
+  // threshold knobs change. We bail early when:
+  //   • no Train teachers selected     → preview = null (empty state below)
+  //   • thresholds are invalid (t_low > t_high) → don't waste a 422 round-trip
+  // The seq guard prevents an in-flight slow response from clobbering a
+  // fresher result, which matters once teacher COCOs get large.
+  useEffect(() => {
+    const trainIds = [...trainSet];
+    if (trainIds.length === 0) {
+      setPreview(null);
+      setPreviewError(null);
+      return;
+    }
+    if (!thresholdsValid) {
+      // Don't ping the server when we know it'll 422; the form is going
+      // to reject Start anyway.
+      setPreviewError(null);
+      return;
+    }
+    const seq = ++previewSeqRef.current;
+    const handle = setTimeout(() => {
+      previewBuckets({
+        teacher_ids: trainIds,
+        t_high: tHigh,
+        t_low: tLow,
+        treat_empty_as_negative: treatEmptyAsNegative,
+      })
+        .then((res) => {
+          if (seq !== previewSeqRef.current) return;  // a newer call superseded us
+          setPreview(res);
+          setPreviewError(null);
+        })
+        .catch((err: unknown) => {
+          if (seq !== previewSeqRef.current) return;
+          setPreviewError(
+            err instanceof Error ? err.message : "preview failed",
+          );
+          setPreview(null);
+        });
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [trainSet, tHigh, tLow, treatEmptyAsNegative, thresholdsValid]);
 
   if (teachers.length === 0) {
     return (
@@ -349,6 +423,24 @@ function NewStudentForm({
         </div>
       </div>
 
+      <BucketPreviewLine
+        preview={preview}
+        previewError={previewError}
+        trainTeacherCount={trainSet.size}
+        thresholdsValid={thresholdsValid}
+      />
+
+      <AdvancedThresholdPanel
+        open={advancedOpen}
+        onToggle={() => setAdvancedOpen((v) => !v)}
+        tHigh={tHigh}
+        tLow={tLow}
+        treatEmptyAsNegative={treatEmptyAsNegative}
+        onTHighChange={setTHigh}
+        onTLowChange={setTLow}
+        onTreatEmptyAsNegativeChange={setTreatEmptyAsNegative}
+      />
+
       {stages && (
         <div className="toolchain-rows">
           {stages.map((stage) => {
@@ -390,7 +482,7 @@ function NewStudentForm({
         <button
           type="button"
           className="run-button"
-          disabled={trainSet.size === 0}
+          disabled={trainSet.size === 0 || !thresholdsValid}
           onClick={async () => {
             const id = await onStart({
               train_teacher_ids: [...trainSet],
@@ -398,14 +490,23 @@ function NewStudentForm({
               detect_impl: overrides["detect"],
               segment_impl: overrides["segment"],
               track_impl: overrides["track"],
+              t_high: tHigh,
+              t_low: tLow,
+              treat_empty_as_negative: treatEmptyAsNegative,
             });
             // On success, clear the form so the user gets a clean slate
             // for the next Student. Keep selections on failure so they
-            // don't have to re-pick after fixing the error.
+            // don't have to re-pick after fixing the error. Thresholds
+            // also reset to defaults so the next Student doesn't quietly
+            // inherit a tweaked t_high.
             if (id) {
               setTrainSet(new Set());
               setEvalSet(new Set());
               setOverrides({});
+              setTHigh(DEFAULT_T_HIGH);
+              setTLow(DEFAULT_T_LOW);
+              setTreatEmptyAsNegative(false);
+              setAdvancedOpen(false);
             }
           }}
         >
@@ -413,6 +514,11 @@ function NewStudentForm({
         </button>
         {trainSet.size === 0 && (
           <span className="learn-hint">Select at least one Train teacher</span>
+        )}
+        {!thresholdsValid && (
+          <span className="learn-hint learn-hint-warn">
+            t_low must be ≤ t_high
+          </span>
         )}
         {error && <div className="learn-error">{error}</div>}
       </div>
@@ -488,6 +594,7 @@ function SelectedStudent({
                 {stats.train_seconds.toFixed(1)}s
               </span>
             </div>
+            <FrameBucketsRow stats={stats} />
             <div className="result-row">
               <span className="result-key">
                 {stats.per_eval_teacher.length > 0
@@ -530,6 +637,14 @@ function SelectedStudent({
       {stats && stats.per_eval_teacher.length > 0 && (
         <PerEvalTeacherTable
           rows={stats.per_eval_teacher}
+          teacherDetails={teacherDetails}
+          onInspect={onInspectTeacher}
+        />
+      )}
+
+      {stats && stats.per_teacher_buckets.length > 0 && (
+        <PerTrainTeacherBucketTable
+          rows={stats.per_teacher_buckets}
           teacherDetails={teacherDetails}
           onInspect={onInspectTeacher}
         />
@@ -617,6 +732,105 @@ function PerEvalTeacherTable({
   );
 }
 
+/**
+ * Frame buckets row on the Student detail card (Phase 0.5).
+ *
+ *   Frame buckets   432 positive · 87 uncertain (dropped) · 156 true negatives
+ *                                                            (t_high=0.35, t_low=0.15)
+ *
+ * Old runs (pre-Phase-0) come back from the backend with all the bucket
+ * counts defaulted to 0 and `per_teacher_buckets = []`. Render an em-dash
+ * placeholder rather than a row of zeros — zeros would look like "we
+ * trained on nothing" which is wrong.
+ *
+ * "Run was completed but had no positive/uncertain/negative frames" is
+ * not a state Phase 0 can produce (the trainer would have failed at
+ * `prepare_yolo_dataset`), so we treat all-zero as "legacy run, no
+ * breakdown captured" rather than "ran but produced 0 frames".
+ */
+function FrameBucketsRow({
+  stats,
+}: {
+  stats: import("../types").StudentStats;
+}) {
+  const hasBreakdown =
+    stats.n_positive_frames > 0 ||
+    stats.n_uncertain_dropped > 0 ||
+    stats.n_true_negative_frames > 0 ||
+    stats.per_teacher_buckets.length > 0;
+  if (!hasBreakdown) {
+    return (
+      <div className="result-row">
+        <span className="result-key">Frame buckets</span>
+        <span className="result-value muted">— (legacy run, no breakdown)</span>
+      </div>
+    );
+  }
+  return (
+    <div className="result-row">
+      <span className="result-key">Frame buckets</span>
+      <span className="result-value">
+        {stats.n_positive_frames} positive ·{" "}
+        {stats.n_uncertain_dropped} uncertain (dropped) ·{" "}
+        {stats.n_true_negative_frames} true negatives{" "}
+        <span className="muted">
+          (t_high={stats.t_high.toFixed(2)}, t_low={stats.t_low.toFixed(2)}
+          {stats.treat_empty_as_negative ? ", treat_empty_as_negative" : ""})
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Per-train-teacher bucket table (Phase 0.5).
+ *
+ * Mirrors `PerEvalTeacherTable`'s row shape so the eye doesn't have to
+ * re-learn the layout. One row per Train teacher with that teacher's
+ * three bucket counts — useful for spotting "Teacher A is dominating
+ * the positive frames" or "Teacher B is contributing nothing but
+ * uncertain ones (too noisy, raise its t_high?)".
+ */
+function PerTrainTeacherBucketTable({
+  rows,
+  teacherDetails,
+  onInspect,
+}: {
+  rows: import("../types").PerTrainTeacherBucket[];
+  teacherDetails: Record<string, RunDetail>;
+  onInspect: (id: string) => void;
+}) {
+  return (
+    <div className="per-eval-table per-train-bucket-table">
+      <div className="per-eval-table-head per-train-bucket-head">
+        <span>Train Teacher</span>
+        <span>Positive</span>
+        <span>Uncertain</span>
+        <span>True neg.</span>
+      </div>
+      {rows.map((r) => {
+        const t = teacherDetails[r.teacher_id];
+        const label = t?.manifest.prompt ?? r.teacher_id.replace("teacher_", "");
+        return (
+          <div key={r.teacher_id} className="per-eval-row per-train-bucket-row">
+            <button
+              type="button"
+              className="teacher-chip"
+              title={`Inspect ${r.teacher_id}`}
+              onClick={() => onInspect(r.teacher_id)}
+            >
+              {label}
+            </button>
+            <span className="per-eval-num">{r.positive}</span>
+            <span className="per-eval-num">{r.uncertain}</span>
+            <span className="per-eval-num">{r.true_negative}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Renders a list of teacher IDs as clickable chips. Click → open in
  *  Inspector. Falls back to plain ID if the teacher isn't loaded
  *  client-side (e.g. user just opened the tab). */
@@ -646,6 +860,179 @@ function TeacherChips({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * One-line summary of what the trainer would extract right now.
+ *
+ *   Training data preview — 432 positive · 87 uncertain (excluded) · 156 true negatives · 12 classes from 3 teachers
+ *
+ * Empty state when no Train teacher is selected; error state when the
+ * preview request fails (rare — only on backend bugs since validation
+ * is mirrored client-side).
+ */
+function BucketPreviewLine({
+  preview,
+  previewError,
+  trainTeacherCount,
+  thresholdsValid,
+}: {
+  preview: PreviewBucketsResponse | null;
+  previewError: string | null;
+  trainTeacherCount: number;
+  thresholdsValid: boolean;
+}) {
+  if (trainTeacherCount === 0) {
+    return (
+      <div className="bucket-preview bucket-preview-empty">
+        <strong>Training data preview</strong> — pick at least one Train
+        teacher to see what the trainer will extract.
+      </div>
+    );
+  }
+  if (!thresholdsValid) {
+    return (
+      <div className="bucket-preview bucket-preview-error">
+        <strong>Training data preview</strong> — t_low must be ≤ t_high.
+      </div>
+    );
+  }
+  if (previewError) {
+    return (
+      <div className="bucket-preview bucket-preview-error">
+        <strong>Training data preview</strong> — failed: {previewError}
+      </div>
+    );
+  }
+  if (!preview) {
+    return (
+      <div className="bucket-preview bucket-preview-loading">
+        <strong>Training data preview</strong> — calculating…
+      </div>
+    );
+  }
+  const a = preview.aggregate;
+  return (
+    <div className="bucket-preview">
+      <strong>Training data preview</strong> — {a.positive} positive ·{" "}
+      {a.uncertain} uncertain (excluded) · {a.true_negative} true negatives ·{" "}
+      {a.n_classes} {a.n_classes === 1 ? "class" : "classes"} from{" "}
+      {trainTeacherCount} {trainTeacherCount === 1 ? "teacher" : "teachers"}
+    </div>
+  );
+}
+
+/**
+ * Collapsible "Advanced" panel — surfaces the three confidence-band knobs.
+ *
+ * Default-collapsed because most users will run with the spec defaults
+ * (t_high=0.35, t_low=0.15). Opening it reveals a vertical stack of
+ * input rows; each one carries a one-sentence description sourced from
+ * the spec (`docs/student-training.md` Phase 0.4) so the user doesn't
+ * need a separate doc tab to know what they're doing.
+ */
+function AdvancedThresholdPanel({
+  open,
+  onToggle,
+  tHigh,
+  tLow,
+  treatEmptyAsNegative,
+  onTHighChange,
+  onTLowChange,
+  onTreatEmptyAsNegativeChange,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  tHigh: number;
+  tLow: number;
+  treatEmptyAsNegative: boolean;
+  onTHighChange: (v: number) => void;
+  onTLowChange: (v: number) => void;
+  onTreatEmptyAsNegativeChange: (v: boolean) => void;
+}) {
+  // Number inputs are tricky — we want to allow intermediate states like
+  // "0." while typing without snapping to NaN. Strategy: hold a string in
+  // local state, parse on commit, fall back to the previous value if the
+  // user clears the field.
+  return (
+    <div className="advanced-panel">
+      <button
+        type="button"
+        className="advanced-toggle"
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span className="advanced-toggle-caret">{open ? "▾" : "▸"}</span>
+        Advanced
+        {!open && (
+          <span className="advanced-toggle-summary">
+            t_high={tHigh.toFixed(2)} · t_low={tLow.toFixed(2)}
+            {treatEmptyAsNegative ? " · treat_empty_as_negative" : ""}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="advanced-panel-body">
+          <div className="advanced-row">
+            <label className="advanced-row-label">
+              <span className="advanced-row-name mono">t_high</span>
+              <input
+                type="number"
+                step={0.05}
+                min={0}
+                max={1}
+                value={tHigh}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!Number.isNaN(v)) onTHighChange(v);
+                }}
+              />
+            </label>
+            <span className="advanced-row-help">
+              Detections at or above this confidence become labels.
+            </span>
+          </div>
+          <div className="advanced-row">
+            <label className="advanced-row-label">
+              <span className="advanced-row-name mono">t_low</span>
+              <input
+                type="number"
+                step={0.05}
+                min={0}
+                max={1}
+                value={tLow}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!Number.isNaN(v)) onTLowChange(v);
+                }}
+                aria-invalid={tLow > tHigh}
+              />
+            </label>
+            <span className="advanced-row-help">
+              Frames with detections only between t_low and t_high are dropped
+              (teacher was unsure).
+            </span>
+          </div>
+          <div className="advanced-row">
+            <label className="advanced-row-label">
+              <input
+                type="checkbox"
+                checked={treatEmptyAsNegative}
+                onChange={(e) => onTreatEmptyAsNegativeChange(e.target.checked)}
+              />
+              <span className="advanced-row-name mono">
+                treat_empty_as_negative
+              </span>
+            </label>
+            <span className="advanced-row-help">
+              Treat every zero-detection frame as a true negative. Reproduces
+              the old behaviour. Off by default.
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
