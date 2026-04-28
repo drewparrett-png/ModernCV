@@ -6,9 +6,9 @@ narrow — the graph spec is simple, and adding fields piecemeal is fine.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class NodeSpecModel(BaseModel):
@@ -86,6 +86,29 @@ class RunManifestModel(BaseModel):
     status: str
     models: dict[str, str] = Field(default_factory=dict)
     error: Optional[str] = None
+    approved_at: Optional[str] = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def review_status(self) -> Literal["unreviewed", "reviewed", "approved"]:
+        """Three-state human-review summary, derived at serialise time.
+
+        - "approved": `approved_at` is populated (one-click approval stamp).
+        - "reviewed": no approval stamp, but at least one rejection on disk.
+        - "unreviewed": neither — a fresh, untouched run.
+
+        The rejection check uses `has_any_rejections` which short-circuits
+        on file existence + a single non-empty list, so this stays cheap
+        enough to serialise on every /runs entry. If 50-run lists ever show
+        latency, cache the bool in the manifest at write time.
+        """
+        from pipeline import runs as runs_mod
+
+        if self.approved_at is not None:
+            return "approved"
+        if runs_mod.has_any_rejections(runs_mod.run_dir(self.id)):
+            return "reviewed"
+        return "unreviewed"
 
 
 class PerClassStatsModel(BaseModel):
@@ -138,6 +161,14 @@ class RunDetail(BaseModel):
 
 class RunsResponse(BaseModel):
     runs: list[RunManifestModel]
+
+
+class ApproveResponse(BaseModel):
+    """Response for /runs/:id/approve and /runs/:id/unapprove. Only the
+    manifest can change — stats/progress aren't touched — so the wire
+    surface stays minimal."""
+
+    manifest: RunManifestModel
 
 
 class RejectionsResponse(BaseModel):

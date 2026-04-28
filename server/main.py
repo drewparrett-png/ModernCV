@@ -37,6 +37,7 @@ from pipeline.models.registry import REGISTRY
 from pipeline.optimize import run_optimize_in_background
 from pipeline.runner import run as run_graph
 from server.schemas import (
+    ApproveResponse,
     BlockKindInfo,
     BlocksResponse,
     CacheStatusModel,
@@ -308,6 +309,60 @@ def toggle_rejection(run_id: str, req: RejectToggleRequest) -> RejectionsRespons
         raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
     state = runs_mod.toggle_rejection(rdir, req.frame_idx, req.det_idx)
     return RejectionsResponse(rejections={str(k): v for k, v in state.items()})
+
+
+@app.post("/runs/{run_id}/approve", response_model=ApproveResponse)
+def approve_run_endpoint(run_id: str) -> ApproveResponse:
+    """Mark a completed Teacher run as "Approved as ground truth".
+
+    Idempotent: re-approving an already-approved run returns the existing
+    manifest unchanged (the timestamp does NOT shift on a second call —
+    that's a deliberate no-op so a double-click doesn't drift the date).
+
+    Errors:
+      404 — run does not exist.
+      400 — run's status is not "completed". A still-running or failed
+            run has nothing meaningful to approve.
+    """
+    rdir = runs_mod.run_dir(run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+    manifest = runs_mod.read_manifest(rdir)
+    if manifest.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"run {run_id!r} status is {manifest.status!r}; only "
+                "completed runs can be approved as ground truth"
+            ),
+        )
+    updated = runs_mod.approve_run(rdir)
+    return ApproveResponse(manifest=RunManifestModel(**updated.__dict__))
+
+
+@app.post("/runs/{run_id}/unapprove", response_model=ApproveResponse)
+def unapprove_run_endpoint(run_id: str) -> ApproveResponse:
+    """Clear the approval stamp.
+
+    Idempotent: unapproving an unreviewed/reviewed run is a no-op
+    returning the manifest unchanged. Status check still applies — the
+    spec disallows touching `approved_at` on non-completed runs in either
+    direction so the wire field never lies about state.
+    """
+    rdir = runs_mod.run_dir(run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+    manifest = runs_mod.read_manifest(rdir)
+    if manifest.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"run {run_id!r} status is {manifest.status!r}; only "
+                "completed runs can have their approval changed"
+            ),
+        )
+    updated = runs_mod.unapprove_run(rdir)
+    return ApproveResponse(manifest=RunManifestModel(**updated.__dict__))
 
 
 @app.delete("/runs/{run_id}")

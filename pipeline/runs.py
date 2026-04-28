@@ -63,6 +63,11 @@ class RunManifest:
     status: str = "running"  # "running" | "completed" | "failed"
     models: dict[str, str] = field(default_factory=dict)
     error: Optional[str] = None
+    # ISO 8601 UTC timestamp set when the run is marked "Approved as ground
+    # truth" via /runs/{id}/approve. None means not approved (review_status
+    # is then derived from rejection presence). Default None so legacy
+    # manifests load unchanged.
+    approved_at: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -304,6 +309,32 @@ def mark_failed(rdir: Path, error: str) -> RunManifest:
     manifest.ended_at = (
         datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     )
+    write_manifest(rdir, manifest)
+    return manifest
+
+
+def approve_run(rdir: Path) -> RunManifest:
+    """Stamp `approved_at` on the manifest. No-op if already approved.
+
+    Caller (the /runs/{id}/approve endpoint) is responsible for the
+    "must be completed" 400 — this helper trusts its input.
+    """
+    manifest = read_manifest(rdir)
+    if manifest.approved_at is not None:
+        return manifest
+    manifest.approved_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    write_manifest(rdir, manifest)
+    return manifest
+
+
+def unapprove_run(rdir: Path) -> RunManifest:
+    """Clear `approved_at`. No-op if not currently approved."""
+    manifest = read_manifest(rdir)
+    if manifest.approved_at is None:
+        return manifest
+    manifest.approved_at = None
     write_manifest(rdir, manifest)
     return manifest
 
@@ -579,6 +610,36 @@ def detection_to_dict(det: Any) -> dict:
 
 
 # ---- Rejections (human curation) ------------------------------------------
+
+
+def has_any_rejections(rdir: Path) -> bool:
+    """Cheap "is anything rejected here?" check for `review_status` derivation.
+
+    Avoids parsing the full rejection map — `review_status` is computed on
+    every /runs listing entry, so a 50-run directory must not pay 50 full
+    JSON parses. Short-circuits on:
+
+      1. File missing → False.
+      2. File present but empty / "{}" → False.
+      3. File parseable as a dict with at least one frame whose value is
+         a non-empty list → True.
+
+    Anything malformed (bad JSON, non-dict root) is treated as "no
+    rejections" — same defensive behavior as `read_rejections`.
+    """
+    p = rdir / REJECTIONS_NAME
+    if not p.exists():
+        return False
+    try:
+        raw = json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(raw, dict):
+        return False
+    for v in raw.values():
+        if isinstance(v, list) and len(v) > 0:
+            return True
+    return False
 
 
 def read_rejections(rdir: Path) -> dict[int, list[int]]:
