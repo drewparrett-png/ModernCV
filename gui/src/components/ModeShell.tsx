@@ -1,16 +1,15 @@
 /**
  * Top-level mode shell — the front door of the app.
  *
- * Three tabs: Learn (the simple wizard), Optimize (distill from a Teacher
- * run), Graph Editor (advanced — the original block-graph view). Optimize
- * is disabled until at least one completed Teacher run exists on disk.
+ * Two tabs: Learn (the simple wizard) and Optimize (distill from a Teacher
+ * run). Optimize is disabled until at least one completed Teacher run
+ * exists on disk.
  */
 
 import { useStore } from "../store";
 import type { Mode } from "../types";
 import { Learn } from "../modes/Learn";
 import { Optimize } from "../modes/Optimize";
-import { GraphEditor } from "../modes/GraphEditor";
 import { RunInspector } from "./RunInspector";
 
 interface TabDef {
@@ -22,7 +21,6 @@ interface TabDef {
 const TABS: TabDef[] = [
   { mode: "learn", label: "Learn", blurb: "Teach the system from scratch" },
   { mode: "optimize", label: "Optimize", blurb: "Distill a fast student" },
-  { mode: "graph", label: "Graph Editor", blurb: "Advanced — raw block graph" },
 ];
 
 export function ModeShell() {
@@ -67,7 +65,6 @@ export function ModeShell() {
       <div className="mode-body">
         {mode === "learn" && <Learn />}
         {mode === "optimize" && <Optimize />}
-        {mode === "graph" && <GraphEditor />}
       </div>
 
       {inspectingRunId && <RunInspector />}
