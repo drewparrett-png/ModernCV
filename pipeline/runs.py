@@ -243,6 +243,22 @@ class StudentStats:
     t_high: float = 0.35
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
+    # ---- Phase 2.2 comparability fields ---------------------------------
+    # Stamped so the Phase 3 compare view can flag mismatches across
+    # students. All defaulted so old stats.json files (without these
+    # keys) keep loading without a migration script.
+    #   • `imgsz`       — image size the trainer trained / evaluated at.
+    #     Different sizes invalidate latency comparisons.
+    #   • `device`      — what the trainer actually ran on
+    #     ("cuda" | "mps" | "cpu" | ""). Empty string for legacy runs
+    #     where it wasn't recorded.
+    #   • `inference_warmup_discarded` — whether `time_inference` dropped
+    #     a warmup pass before sampling. Recorded as a fact so future
+    #     trainers that *don't* discard a warmup are visibly different
+    #     in compare-view tooltips. YoloTrainer always discards.
+    imgsz: int = 640
+    device: str = ""
+    inference_warmup_discarded: bool = True
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)

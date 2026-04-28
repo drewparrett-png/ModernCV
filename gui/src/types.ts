@@ -249,6 +249,14 @@ export interface StudentStats {
   t_high: number;
   t_low: number;
   treat_empty_as_negative: boolean;
+  // ---- Phase 2.2 comparability fields --------------------------------
+  // Defaulted on the backend so old stats.json files keep loading.
+  // Phase 3's compare view surfaces these and badges any cross-student
+  // mismatch (different imgsz invalidates latency comparisons, etc).
+  // `device` is "" for legacy runs where it wasn't recorded.
+  imgsz: number;
+  device: string;
+  inference_warmup_discarded: boolean;
 }
 
 export interface StudentDetail {

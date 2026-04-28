@@ -327,6 +327,13 @@ class StudentStatsModel(BaseModel):
     t_high: float = 0.35
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
+    # ---- Phase 2.2 comparability fields (mirror of StudentStats) --------
+    # Defaulted so old stats.json files without these keys still load
+    # cleanly. The Phase 3 compare view will surface mismatches; this
+    # phase only persists them.
+    imgsz: int = 640
+    device: str = ""
+    inference_warmup_discarded: bool = True
 
 
 class StudentDetail(BaseModel):

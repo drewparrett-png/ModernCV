@@ -32,8 +32,16 @@ from pipeline import distill, runs as runs_mod
 # `@register(...)` side effect — must happen before `make_trainer` is
 # called below.
 from pipeline.students import make_trainer
+from pipeline.students.yolo import _pick_device
 
 log = logging.getLogger(__name__)
+
+
+# Default image size passed to every trainer's `train()`. Hoisted to a
+# module constant so the same value gets stamped on `StudentStats.imgsz`
+# (Phase 2.2) without two literal-640s drifting. When per-architecture
+# overrides land, lift this to a `make_trainer()`-returned default.
+_DEFAULT_IMGSZ = 640
 
 
 def _now_iso() -> str:
@@ -336,7 +344,7 @@ def _run_distillation(
         # YOLO's 640 today, will diverge once RT-DETR/DINOv3 land. We pass
         # 640 explicitly so the YOLO trainer's behaviour is byte-identical
         # to the pre-Phase-1 code path (`train_yolo` defaulted imgsz=640).
-        imgsz=640,
+        imgsz=_DEFAULT_IMGSZ,
         progress=_epoch_progress,
     )
     weights = train_result.weights_path
@@ -432,6 +440,17 @@ def _run_distillation(
         t_high=t_high,
         t_low=t_low,
         treat_empty_as_negative=treat_empty_as_negative,
+        # Phase 2.2 comparability fields. `imgsz` mirrors what we passed
+        # into `trainer.train()`. `device` is what the trainer actually
+        # used (re-evaluating `_pick_device()` here matches the trainer's
+        # internal pick — same function, same machine). The warmup-discard
+        # flag is a fixed fact of `YoloTrainer.time_inference`'s body
+        # (it always drops call #1); recording it here means future
+        # trainers that don't can flip it to False without touching the
+        # caller. Phase 3 surfaces these on the compare view.
+        imgsz=_DEFAULT_IMGSZ,
+        device=_pick_device(),
+        inference_warmup_discarded=True,
     )
     runs_mod.mark_student_completed(rdir, stats)
     log.info(
