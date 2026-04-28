@@ -189,6 +189,11 @@ class StudentManifest:
     t_high: float = 0.35
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
+    # Trainer architecture (Phase 1.3). Defaulted to "yolov8n" so old
+    # manifests without this key load as the only architecture that
+    # existed before the dispatcher. Future runs persist whatever the
+    # GUI sent — `yolov8s`, `rtdetr-l`, etc.
+    architecture: str = "yolov8n"
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -558,6 +563,7 @@ def create_student(
     t_high: float = 0.35,
     t_low: float = 0.15,
     treat_empty_as_negative: bool = False,
+    architecture: str = "yolov8n",
     runs_root: Path = RUNS_DIR,
 ) -> tuple[Path, StudentManifest]:
     """Allocate a fresh Student dir + initial 'running' manifest.
@@ -593,6 +599,7 @@ def create_student(
         t_high=t_high,
         t_low=t_low,
         treat_empty_as_negative=treat_empty_as_negative,
+        architecture=architecture,
     )
     write_student_manifest(rdir, manifest)
     log.info(

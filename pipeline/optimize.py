@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import Optional
 
 from pipeline import distill, runs as runs_mod
+# Importing the students package triggers each trainer module's
+# `@register(...)` side effect — must happen before `make_trainer` is
+# called below.
+from pipeline.students import make_trainer
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +128,7 @@ def run_optimize_in_background(
     t_high: float = 0.35,
     t_low: float = 0.15,
     treat_empty_as_negative: bool = False,
+    architecture: str = "yolov8n",
     runs_root: Path = runs_mod.RUNS_DIR,
 ) -> runs_mod.StudentManifest:
     """Allocate a Student dir, return its manifest, run training on a
@@ -185,6 +190,7 @@ def run_optimize_in_background(
         t_high=t_high,
         t_low=t_low,
         treat_empty_as_negative=treat_empty_as_negative,
+        architecture=architecture,
         runs_root=runs_root,
     )
 
@@ -208,6 +214,7 @@ def run_optimize_in_background(
                 t_high=t_high,
                 t_low=t_low,
                 treat_empty_as_negative=treat_empty_as_negative,
+                architecture=architecture,
             )
         except Exception as e:
             log.exception("optimize worker crashed: %s", e)
@@ -258,6 +265,7 @@ def _run_distillation(
     t_high: float = 0.35,
     t_low: float = 0.15,
     treat_empty_as_negative: bool = False,
+    architecture: str = "yolov8n",
 ) -> None:
     """Drive the four phases (prep → train → eval → time) and persist stats.
 
@@ -277,6 +285,12 @@ def _run_distillation(
 
     started_at = _now_iso()
     progress = _progress_writer(rdir, total_epochs=epochs, started_at=started_at)
+
+    # The trainer dispatch (Phase 1.3): pick the architecture's trainer
+    # implementation up front so an unknown name fails fast — before we
+    # extract any frames or write any progress files. The students package
+    # populated the registry at import time (top of this module).
+    trainer = make_trainer(architecture)
 
     # --- Phase 1: prepare the merged YOLO dataset ---------------------------
     progress("loading_models",
@@ -309,17 +323,24 @@ def _run_distillation(
         )
 
     # --- Phase 2: train ----------------------------------------------------
-    progress("running", f"Training YOLOv8n for {epochs} epochs", 0, epochs)
+    progress("running", f"Training {architecture} for {epochs} epochs", 0, epochs)
 
     def _epoch_progress(epoch: int, total: int) -> None:
         progress("running", f"Training epoch {epoch}/{total}", epoch, total)
 
-    weights, train_seconds = distill.train_yolo(
+    train_result = trainer.train(
         data_yaml=summary.data_yaml,
         student_dir=rdir,
         epochs=epochs,
+        # Dispatcher uses the architecture's framework default for imgsz —
+        # YOLO's 640 today, will diverge once RT-DETR/DINOv3 land. We pass
+        # 640 explicitly so the YOLO trainer's behaviour is byte-identical
+        # to the pre-Phase-1 code path (`train_yolo` defaulted imgsz=640).
+        imgsz=640,
         progress=_epoch_progress,
     )
+    weights = train_result.weights_path
+    train_seconds = train_result.train_seconds
 
     # --- Phase 3: per-eval-teacher mAP -------------------------------------
     per_eval: list[dict] = []
@@ -337,7 +358,7 @@ def _run_distillation(
                     eval_teacher_id=etid,
                     class_names=summary.class_names,
                 )
-                map50, map5095 = distill.eval_yolo(weights=weights, data_yaml=eval_yaml)
+                map50, map5095 = trainer.eval(weights=weights, data_yaml=eval_yaml)
             except Exception as e:
                 # One bad eval teacher (e.g. missing source video) shouldn't
                 # tank the whole run — record a zero row and carry on. The
@@ -376,7 +397,7 @@ def _run_distillation(
             timing_dir = first_eval
     if timing_dir is None:
         timing_dir = rdir / "dataset" / "images" / "val"
-    avg_ms, p50_ms, p95_ms = distill.time_inference(
+    avg_ms, p50_ms, p95_ms = trainer.time_inference(
         weights=weights, sample_image_dir=timing_dir,
     )
 

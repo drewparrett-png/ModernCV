@@ -216,6 +216,12 @@ class OptimizeRequest(BaseModel):
     t_high: float = 0.35
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
+    # Trainer architecture (Phase 1.3). Default `yolov8n` reproduces the
+    # only architecture the project supported before the dispatcher landed.
+    # Validated at model_validator time against the live registry so
+    # bogus values 422 immediately rather than spinning up a worker that
+    # crashes inside `make_trainer`.
+    architecture: str = "yolov8n"
 
     @model_validator(mode="after")
     def _t_low_le_t_high(self) -> "OptimizeRequest":
@@ -223,6 +229,27 @@ class OptimizeRequest(BaseModel):
             raise ValueError(
                 f"t_low ({self.t_low}) must be <= t_high ({self.t_high}) — "
                 "the uncertain band [t_low, t_high) would otherwise be empty/inverted."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _architecture_is_registered(self) -> "OptimizeRequest":
+        """Reject unknown architectures at request time so the GUI sees
+        a 422 inline, not a "Student failed" row a few seconds later.
+
+        We import lazily so this module stays importable even when the
+        registry hasn't been populated yet (e.g. test collection before
+        the optimize worker has touched the package). The list of valid
+        names is read live so newly-registered trainers light up without
+        a schema change.
+        """
+        from pipeline.students import list_trainers
+
+        available = list_trainers()
+        if self.architecture not in available:
+            raise ValueError(
+                f"unknown architecture {self.architecture!r} — "
+                f"available: {available or '<none registered>'}"
             )
         return self
 
@@ -244,6 +271,10 @@ class StudentManifestModel(BaseModel):
     t_high: float = 0.35
     t_low: float = 0.15
     treat_empty_as_negative: bool = False
+    # Trainer architecture (Phase 1.3). Defaulted to `yolov8n` so old
+    # manifest.json files without this key load as the only architecture
+    # that existed before the dispatcher.
+    architecture: str = "yolov8n"
 
 
 class PerEvalTeacherStat(BaseModel):
