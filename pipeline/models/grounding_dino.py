@@ -35,6 +35,7 @@ from typing import Any, Optional
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 from pipeline.blocks.base import BlockKind, Detection, FrameBatch
+from pipeline.model_cache import is_hf_cached
 from pipeline.models.adapters import Adapter
 from pipeline.models.registry import register
 
@@ -224,17 +225,28 @@ class GroundingDINOAdapter(Adapter):
             self.resize_longest_edge = int(self.resize_longest_edge)
 
         self.device = _pick_device()
+        # Local-first load. If the model is already in the HF cache, pass
+        # `local_files_only=True` so neither call issues a HEAD against
+        # huggingface.co to check freshness — that HEAD is the source of
+        # "transient DNS blip kills my Learn run" failures. On a cache
+        # miss, fall through to the default networked path which will
+        # download once and populate the cache for next time.
+        cached = is_hf_cached(self.model_id)
+        load_kwargs: dict[str, Any] = {"local_files_only": True} if cached else {}
         log.info(
-            "GroundingDINO: loading %s on %s (prompt=%r, full_resolution=%s, "
-            "resize_longest_edge=%s)",
+            "GroundingDINO: loading %s on %s (cached=%s, prompt=%r, "
+            "full_resolution=%s, resize_longest_edge=%s)",
             self.model_id,
             self.device,
+            cached,
             self.prompt,
             self.full_resolution,
             self.resize_longest_edge,
         )
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id)
+        self.processor = AutoProcessor.from_pretrained(self.model_id, **load_kwargs)
+        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            self.model_id, **load_kwargs
+        )
         self.model = self.model.to(self.device)
         self.model.eval()
         # Cache the imported torch module so process() doesn't re-import per frame.

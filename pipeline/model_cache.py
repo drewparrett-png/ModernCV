@@ -48,7 +48,7 @@ KNOWN_MODELS: dict[str, ModelInfo] = {
 }
 
 
-def _hf_is_cached(model_id: str) -> bool:
+def is_hf_cached(model_id: str) -> bool:
     """Probe the HuggingFace cache without loading the model.
 
     Asks for a small, always-present file (config.json) and reports True
@@ -59,6 +59,12 @@ def _hf_is_cached(model_id: str) -> bool:
     We treat only the first case as cached. Any error (ImportError,
     network, etc.) is treated as 'not cached' so we err toward asking the
     user before a download.
+
+    Public so adapters (e.g. GroundingDINO) can gate their `from_pretrained`
+    calls on cache state and pass `local_files_only=True` when the weights
+    are already on disk — avoids the HEAD-check round-trip the HF library
+    does by default, which is the source of "transient DNS blip kills my
+    Learn run" failures.
     """
     try:
         from huggingface_hub import try_to_load_from_cache
@@ -93,7 +99,7 @@ def cache_status(impl: str) -> CacheStatus:
         return CacheStatus(impl=impl, known=False, cached=True, estimated_bytes=0)
 
     if info.backend == "huggingface":
-        cached = _hf_is_cached(info.model_id)
+        cached = is_hf_cached(info.model_id)
     else:  # pragma: no cover — future backends
         cached = True
 
