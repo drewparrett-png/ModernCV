@@ -48,6 +48,7 @@ import type {
 interface LearnFormState {
   videoPath: string;
   maxFrames: number | null;
+  frameStride: number;
 }
 
 interface State {
@@ -310,6 +311,7 @@ export const useStore = create<State>((set, get) => ({
   learnForm: {
     videoPath: "",
     maxFrames: 60,
+    frameStride: 1,
   },
   setLearnField(key, value) {
     set({ learnForm: { ...get().learnForm, [key]: value } });
@@ -392,6 +394,7 @@ export const useStore = create<State>((set, get) => ({
     const req: LearnRequest = {
       video_path: learnForm.videoPath,
       max_frames: learnForm.maxFrames ?? undefined,
+      frame_stride: learnForm.frameStride > 1 ? learnForm.frameStride : undefined,
     };
     let initial: RunDetail;
     try {

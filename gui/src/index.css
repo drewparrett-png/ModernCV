@@ -492,6 +492,43 @@ html, body, #root {
 
 .frame-cap { width: 100px !important; }
 
+.video-info-line {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.stride-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.stride-chip {
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #f9fafb;
+  font: inherit;
+  font-size: 12px;
+  color: #374151;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
+}
+
+.stride-chip:hover {
+  border-color: #9ca3af;
+  background: #f3f4f6;
+}
+
+.stride-chip.active {
+  border-color: #4f46e5;
+  background: #eef2ff;
+  color: #4338ca;
+  font-weight: 600;
+}
+
 /* Multi-chip prompt input — each chip is one class. The container looks
  * like a single bordered input, but it's actually a flex row of pill chips
  * + a free-typing input that grows to fill remaining space. */
