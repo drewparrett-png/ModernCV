@@ -1563,6 +1563,15 @@ html, body, #root {
   font-size: 11px;
 }
 
+.teacher-picker-review-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1e40af;
+  white-space: nowrap;
+}
+
 .learn-hint {
   font-size: 12px;
   color: #6b7280;
@@ -3214,6 +3223,48 @@ html, body, #root {
 .crop-review-actions button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ---- Label progress strip -------------------------------------------- */
+
+.crop-label-strip {
+  display: flex;
+  height: 8px;
+  width: 100%;
+  cursor: pointer;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.strip-seg {
+  flex: 1 0 auto;
+  min-width: 2px;
+}
+
+.strip-seg-unreviewed { background: #d1d5db; }
+.strip-seg-accepted   { background: #10b981; }
+.strip-seg-rejected   { background: #ef4444; }
+
+.strip-cursor {
+  outline: 2px solid white;
+  outline-offset: -2px;
+  position: relative;
+  z-index: 1;
+}
+
+.crop-resume-toast {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 10;
+  white-space: nowrap;
 }
 
 /* ---- Student-run panel (Phase 5) -------------------------------------- */
