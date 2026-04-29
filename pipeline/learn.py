@@ -17,6 +17,7 @@ a worker thread that updates `progress.json` periodically. The server's
 
 from __future__ import annotations
 
+import gc
 import logging
 import queue
 import threading
@@ -28,7 +29,7 @@ from typing import Optional
 
 import cv2
 
-from pipeline import model_cache, runs as runs_mod
+from pipeline import model_cache, perf, runs as runs_mod
 from pipeline.blocks.base import BlockKind
 from pipeline.graph import GraphSpec, NodeSpec
 from pipeline.runner import run as run_graph
@@ -164,21 +165,62 @@ def _execute_queued_job(job: _LearnJob) -> None:
     )
     log.info("worker thread started for run %s", manifest.id)
 
-    _run_with_dir(
-        rdir=job.rdir,
-        manifest=manifest,
-        task=job.task,
-        prompt=job.prompt,
-        prompts=job.prompts,
-        video_path=job.video_path,
-        total_frames=job.total_frames,
-        started_at=job.started_at,
-        detect_impl=job.detect_impl,
-        segment_impl=job.segment_impl,
-        reid_impl=job.reid_impl,
-        track_impl=job.track_impl,
-        max_frames=job.max_frames,
+    # Phase 6: diagnostics around every queued run. The pre/post deltas
+    # in the file are what tells us whether the queue is leaking memory
+    # — a flat RSS across runs is the goal.
+    rss_before = perf.current_rss_mb()
+    mps_before = perf.mps_allocator_stats()
+    perf.append_diagnostics(
+        {
+            "kind": "run_start",
+            "run_id": manifest.id,
+            "queue_depth": _LEARN_QUEUE.qsize(),
+            "rss_mb": rss_before,
+            "mps_current_mb": mps_before["current_mb"],
+            "mps_driver_mb": mps_before["driver_mb"],
+        }
     )
+
+    try:
+        _run_with_dir(
+            rdir=job.rdir,
+            manifest=manifest,
+            task=job.task,
+            prompt=job.prompt,
+            prompts=job.prompts,
+            video_path=job.video_path,
+            total_frames=job.total_frames,
+            started_at=job.started_at,
+            detect_impl=job.detect_impl,
+            segment_impl=job.segment_impl,
+            reid_impl=job.reid_impl,
+            track_impl=job.track_impl,
+            max_frames=job.max_frames,
+        )
+    finally:
+        # Phase 6 fix #2: drop allocator-cached buffers between runs.
+        # Without these two calls the second and subsequent runs in the
+        # queue start with the previous run's tensors still resident on
+        # the device and drift slower frame-by-frame.
+        gc.collect()
+        perf.empty_mps_cache()
+        rss_after = perf.current_rss_mb()
+        mps_after = perf.mps_allocator_stats()
+        perf.append_diagnostics(
+            {
+                "kind": "run_end",
+                "run_id": manifest.id,
+                "queue_depth": _LEARN_QUEUE.qsize(),
+                "rss_mb": rss_after,
+                "mps_current_mb": mps_after["current_mb"],
+                "mps_driver_mb": mps_after["driver_mb"],
+                "rss_delta_mb": (
+                    None
+                    if rss_before is None or rss_after is None
+                    else rss_after - rss_before
+                ),
+            }
+        )
 
 
 # Default impl picks per task. These are what shows up if the wizard
@@ -706,7 +748,7 @@ def _run_with_dir(
         with runs_mod.PerFrameWriter(rdir) as pfw:
             t_start = time.perf_counter()
             t_prev = t_start
-            iterator = run_graph(graph)
+            iterator = run_graph(graph, run_id=manifest.id)
             for batch in iterator:
                 t_now = time.perf_counter()
                 ms = (t_now - t_prev) * 1000.0
