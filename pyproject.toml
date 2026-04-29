@@ -24,6 +24,7 @@ dependencies = [
     "tqdm>=4.66.0",
     "transformers>=4.45.0",      # GroundingDINO via IDEA-Research/grounding-dino-tiny
     "accelerate>=0.34.0",        # device placement / autocast helpers used by transformers
+    "psutil>=5.9.0",             # Phase 6: RSS probe for the perf reproducer
 ]
 
 [project.optional-dependencies]
