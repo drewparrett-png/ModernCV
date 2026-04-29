@@ -14,11 +14,13 @@
  */
 
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type MouseEvent,
 } from "react";
 import { useStore } from "../store";
 import {
@@ -34,6 +36,42 @@ import type { DetectionRow, FrameStatesMap } from "../types";
 
 const PREFETCH_AHEAD = 3;
 const CROP_PAD = 24;
+
+type SegColor = "accepted" | "rejected" | "unreviewed";
+
+const LabelStrip = memo(function LabelStrip({
+  colors,
+  index,
+  onJump,
+}: {
+  colors: SegColor[];
+  index: number;
+  onJump: (i: number) => void;
+}) {
+  const total = colors.length;
+  function handleClick(e: MouseEvent<HTMLDivElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const i = Math.min(
+      total - 1,
+      Math.floor(((e.clientX - rect.left) / rect.width) * total),
+    );
+    onJump(i);
+  }
+  return (
+    <div
+      className="crop-label-strip"
+      onClick={handleClick}
+      title="Click to navigate to a crop"
+    >
+      {colors.map((c, i) => (
+        <span
+          key={i}
+          className={`strip-seg strip-seg-${c}${i === index ? " strip-cursor" : ""}`}
+        />
+      ))}
+    </div>
+  );
+});
 
 interface UndoEntry {
   /** Position in the detection list at the time of the action — restored
@@ -105,6 +143,16 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
     }
     return n;
   }, [liveDetections, frameStates]);
+
+  const stripColors = useMemo<SegColor[]>(
+    () =>
+      liveDetections.map((d) => {
+        const entry = frameStates[String(d.frame_idx)];
+        if (!entry) return "unreviewed";
+        return d.accepted ? "accepted" : "rejected";
+      }),
+    [liveDetections, frameStates],
+  );
 
   // Persist the current frame's intended `rejected_dets` for the given
   // detection. Returns the prior frame entry (for undo) or null if the
@@ -287,6 +335,9 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
 
         {error && <div className="inspector-error">Failed to load: {error}</div>}
         {!error && !loaded && <div className="inspector-loading">Loading…</div>}
+        {loaded && total > 0 && (
+          <LabelStrip colors={stripColors} index={index} onJump={setIndex} />
+        )}
         {loaded && total === 0 && (
           <div className="inspector-empty">
             No detections in this run. Crop review is empty.
