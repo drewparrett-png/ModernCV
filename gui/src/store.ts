@@ -140,6 +140,7 @@ function patchNodeData(
 }
 
 const POLL_MS = 1500;
+const QUEUED_POLL_MS = 8_000; // queued runs don't change until the worker picks them
 
 export const useStore = create<State>((set, get) => ({
   mode: "learn",
@@ -413,7 +414,7 @@ export const useStore = create<State>((set, get) => ({
       initial.manifest.status === "running" ||
       initial.manifest.status === "queued"
     ) {
-      _startTeacherPoll(pid, initial.manifest.id);
+      _startTeacherPoll(pid, initial.manifest.id, initial.manifest.status === "running");
     }
     return initial.manifest.id;
   },
@@ -542,11 +543,14 @@ export const useStore = create<State>((set, get) => ({
 
 // ---- Poll helpers ----------------------------------------------------------
 
-function _startTeacherPoll(projectId: string, id: string): void {
+function _startTeacherPoll(projectId: string, id: string, fast = false): void {
   const existing = useStore.getState().teacherPolls[id];
   if (existing) return;
 
-  const handle = setInterval(async () => {
+  const intervalMs = fast ? POLL_MS : QUEUED_POLL_MS;
+  // Use `let` so the callback can reference handle for self-cancellation.
+  let handle: ReturnType<typeof setInterval>;
+  handle = setInterval(async () => {
     try {
       const latest = await fetchRunDetail(projectId, id);
       useStore.setState((s) => ({
@@ -554,16 +558,26 @@ function _startTeacherPoll(projectId: string, id: string): void {
       }));
       const status = latest.manifest.status;
       if (status !== "queued" && status !== "running") {
-        const polls = useStore.getState().teacherPolls;
-        if (polls[id]) clearInterval(polls[id]);
-        const next = { ...polls };
-        delete next[id];
-        useStore.setState({ teacherPolls: next });
+        clearInterval(handle);
+        useStore.setState((s) => {
+          const next = { ...s.teacherPolls };
+          delete next[id];
+          return { teacherPolls: next };
+        });
+      } else if (status === "running" && !fast) {
+        // Run just became active — escalate from slow queued poll to fast running poll.
+        clearInterval(handle);
+        useStore.setState((s) => {
+          const next = { ...s.teacherPolls };
+          delete next[id];
+          return { teacherPolls: next };
+        });
+        _startTeacherPoll(projectId, id, true);
       }
     } catch (e) {
       console.error("teacher poll failed", e);
     }
-  }, POLL_MS);
+  }, intervalMs);
   useStore.setState((s) => ({
     teacherPolls: { ...s.teacherPolls, [id]: handle },
   }));
