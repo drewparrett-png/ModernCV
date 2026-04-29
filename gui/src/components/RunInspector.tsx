@@ -352,7 +352,12 @@ export function RunInspector() {
                 /* keep stale local state — non-fatal */
               });
             fetchRunDetail(projectId, runId)
-              .then((d) => setDetail(d))
+              .then((d) => {
+                setDetail(d);
+                useStore.setState((s) => ({
+                  teacherDetails: { ...s.teacherDetails, [runId]: d },
+                }));
+              })
               .catch(() => {
                 /* non-fatal */
               });

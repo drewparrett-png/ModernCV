@@ -537,6 +537,13 @@ function NewStudentForm({
                     <span className="teacher-picker-prompt">
                       {t.manifest.prompt}
                     </span>
+                    {t.manifest.review_status !== "unreviewed" && (
+                      <span className="teacher-picker-review-badge">
+                        {t.manifest.review_status === "approved"
+                          ? "Fully curated"
+                          : `${t.manifest.n_frames_reviewed}/${t.manifest.n_frames_total} reviewed`}
+                      </span>
+                    )}
                   </div>
                   <div className="teacher-picker-row-sub mono">{id}</div>
                 </div>
