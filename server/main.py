@@ -66,7 +66,11 @@ from pipeline.learn import (
     stop_learn_worker,
 )
 from pipeline.models.registry import REGISTRY
-from pipeline.optimize import run_optimize_in_background
+from pipeline.optimize import (
+    ensure_optimize_worker_started,
+    run_optimize_in_background,
+    stop_optimize_worker,
+)
 from pipeline.runner import run as run_graph
 from pipeline.student_run import (
     ensure_student_run_worker_started,
@@ -126,11 +130,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if n:
         log.info("startup: marked %d stale runs as failed", n)
     ensure_learn_worker_started()
+    ensure_optimize_worker_started()
     ensure_student_run_worker_started()
     try:
         yield
     finally:
         stop_student_run_worker()
+        stop_optimize_worker()
         stop_learn_worker()
 
 
@@ -847,6 +853,111 @@ def preview_buckets(
         ),
         per_teacher=per_teacher,
     )
+
+
+@app.get("/projects/{project_id}/students/{student_id}/training_curve")
+def training_curve(project_id: str, student_id: str) -> dict:
+    """Read the Ultralytics-emitted `results.csv` for a Student and
+    return per-epoch loss + val mAP as parallel arrays.
+
+    Useful for the GUI's training-curve charts. Returns 404 if the
+    file isn't there yet — happens during the prep / first epoch
+    window. The GUI renders an empty-state placeholder in that case.
+    """
+    _require_project(project_id)
+    rdir = runs_mod.student_dir(project_id, student_id)
+    if not rdir.exists():
+        raise HTTPException(status_code=404, detail=f"no such student: {student_id}")
+    csv_path = rdir / "ultralytics" / "train" / "results.csv"
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="no results.csv yet")
+
+    epochs: list[int] = []
+    train_loss: list[float] = []
+    val_map50: list[float] = []
+    val_map50_95: list[float] = []
+    try:
+        import csv as _csv
+
+        with csv_path.open() as f:
+            reader = _csv.DictReader(f)
+            # Ultralytics' CSV column names have shifted across versions —
+            # tolerate "epoch" with or without leading whitespace, and
+            # accept either of two naming conventions for box loss / mAP.
+            for raw in reader:
+                row = {k.strip(): v for k, v in raw.items() if k}
+                # Pick the first matching key from each candidate list.
+                def pick(keys: list[str]) -> Optional[str]:
+                    for k in keys:
+                        if k in row and row[k] not in ("", None):
+                            return row[k]
+                    return None
+
+                ep = pick(["epoch"])
+                tl = pick(["train/box_loss", "train/loss"])
+                m50 = pick(["metrics/mAP50(B)", "metrics/mAP_0.5", "val/mAP50"])
+                m5095 = pick(
+                    ["metrics/mAP50-95(B)", "metrics/mAP_0.5:0.95", "val/mAP50-95"]
+                )
+                if ep is None:
+                    continue
+                try:
+                    epochs.append(int(float(ep)))
+                    train_loss.append(float(tl) if tl is not None else 0.0)
+                    val_map50.append(float(m50) if m50 is not None else 0.0)
+                    val_map50_95.append(float(m5095) if m5095 is not None else 0.0)
+                except (TypeError, ValueError):
+                    continue
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to parse results.csv: {e}")
+
+    return {
+        "epochs": epochs,
+        "train_loss": train_loss,
+        "val_map50": val_map50,
+        "val_map50_95": val_map50_95,
+    }
+
+
+@app.get("/projects/{project_id}/students/{student_id}/samples")
+def list_student_samples(project_id: str, student_id: str) -> dict:
+    """List rendered eval-prediction-comparison images, grouped by
+    eval teacher. Returns {teacher_id: [filename, ...]} sorted by
+    filename. Empty dict when nothing has been rendered yet (run
+    didn't complete, or pre-Phase-7 student).
+    """
+    _require_project(project_id)
+    rdir = runs_mod.student_dir(project_id, student_id)
+    if not rdir.exists():
+        raise HTTPException(status_code=404, detail=f"no such student: {student_id}")
+    samples_root = rdir / "samples"
+    out: dict[str, list[str]] = {}
+    if samples_root.exists():
+        for tdir in sorted(samples_root.iterdir()):
+            if not tdir.is_dir():
+                continue
+            jpgs = sorted(p.name for p in tdir.glob("*.jpg"))
+            if jpgs:
+                out[tdir.name] = jpgs
+    return {"samples": out}
+
+
+@app.get(
+    "/projects/{project_id}/students/{student_id}/samples/{teacher_id}/{name}"
+)
+def get_student_sample(
+    project_id: str, student_id: str, teacher_id: str, name: str
+) -> FileResponse:
+    """Serve one rendered comparison image. `name` must end in `.jpg`
+    and contain no path separators — guards against directory traversal."""
+    _require_project(project_id)
+    if "/" in name or "\\" in name or not name.endswith(".jpg"):
+        raise HTTPException(status_code=400, detail="invalid sample name")
+    rdir = runs_mod.student_dir(project_id, student_id)
+    path = rdir / "samples" / teacher_id / name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="sample not found")
+    return FileResponse(str(path), media_type="image/jpeg")
 
 
 @app.delete("/projects/{project_id}/students/{student_id}")

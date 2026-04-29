@@ -462,3 +462,51 @@ export function studentRunFrameUrl(
     `/runs/${encodeURIComponent(runId)}/frame/${idx}?source=${source}`
   );
 }
+
+export interface TrainingCurve {
+  epochs: number[];
+  train_loss: number[];
+  val_map50: number[];
+  val_map50_95: number[];
+}
+
+export async function fetchTrainingCurve(
+  projectId: string,
+  studentId: string,
+): Promise<TrainingCurve | null> {
+  const res = await fetch(
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}/training_curve`,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`GET training_curve: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchStudentSamples(
+  projectId: string,
+  studentId: string,
+): Promise<Record<string, string[]>> {
+  const res = await fetch(
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}/samples`,
+  );
+  if (!res.ok) {
+    if (res.status === 404) return {};
+    throw new Error(`GET samples: ${res.status}`);
+  }
+  const body = await res.json();
+  return body.samples ?? {};
+}
+
+export function studentSampleUrl(
+  projectId: string,
+  studentId: string,
+  teacherId: string,
+  name: string,
+): string {
+  return (
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}` +
+    `/samples/${encodeURIComponent(teacherId)}/${encodeURIComponent(name)}`
+  );
+}

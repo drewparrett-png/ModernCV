@@ -15,19 +15,28 @@ training errors. The trainer is heavy and CPU/GPU-bound — keeping them
 separate means the trainer can be unit-tested without spinning up the
 whole web app, and changes to the orchestration (e.g. switching to a
 queue) don't churn the training code.
+
+Concurrency
+-----------
+Training runs go through a singleton FIFO queue served by one daemon
+worker thread. YOLO training is GPU/CPU/RAM heavy; running two in
+parallel reliably saturates a workstation. This mirrors the same
+pattern used in `pipeline.student_run` and `pipeline.learn`.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from pipeline import distill, runs as runs_mod
+from pipeline import distill, runs as runs_mod, sample_render
 # Importing the students package triggers each trainer module's
 # `@register(...)` side effect — must happen before `make_trainer` is
 # called below.
@@ -209,39 +218,162 @@ def run_optimize_in_background(
         runs_root=runs_root,
     )
 
-    _seed_progress(
-        rdir,
-        message=(
+    # Flip to "queued" before enqueuing — the worker will set "running"
+    # when it pops the job. If a previous training is still in flight,
+    # this run's row in the GUI sidebar will show "queued" with the
+    # waiting-for-previous message until its turn comes up.
+    manifest.status = "queued"
+    runs_mod.write_student_manifest(rdir, manifest)
+
+    waiting = _OPTIMIZE_QUEUE.unfinished_tasks > 0 or _is_worker_busy()
+    seed_msg = (
+        "Queued — waiting for previous training to finish"
+        if waiting
+        else (
             f"Preparing dataset from {len(train_teacher_ids)} train teacher(s)"
             + (f" + {len(eval_teacher_ids)} eval" if eval_teacher_ids else "")
-        ),
-        total_epochs=epochs,
+        )
     )
+    _seed_progress(rdir, message=seed_msg, total_epochs=epochs)
 
-    def _worker() -> None:
-        try:
-            _run_distillation(
-                project_id=project_id,
-                rdir=rdir,
-                train_teacher_ids=train_teacher_ids,
-                eval_teacher_ids=eval_teacher_ids,
-                task=task,
-                epochs=epochs,
-                export_threshold=export_threshold,
-                t_low=t_low,
-                treat_empty_as_negative=treat_empty_as_negative,
-                architecture=architecture,
-            )
-        except Exception as e:
-            log.exception("optimize worker crashed: %s", e)
-            try:
-                runs_mod.mark_student_failed(rdir, str(e))
-            except Exception:
-                pass
-
-    th = threading.Thread(target=_worker, name=f"optimize-{manifest.id}", daemon=True)
-    th.start()
+    job = _OptimizeJob(
+        project_id=project_id,
+        rdir=rdir,
+        train_teacher_ids=list(train_teacher_ids),
+        eval_teacher_ids=list(eval_teacher_ids),
+        task=task,
+        epochs=epochs,
+        export_threshold=export_threshold,
+        t_low=t_low,
+        treat_empty_as_negative=treat_empty_as_negative,
+        architecture=architecture,
+    )
+    ensure_optimize_worker_started()
+    _OPTIMIZE_QUEUE.put(job)
     return manifest
+
+
+# ---- Sequential queue ------------------------------------------------------
+
+
+@dataclass
+class _OptimizeJob:
+    """Frozen payload the worker thread needs to execute one training run."""
+
+    project_id: str
+    rdir: Path
+    train_teacher_ids: list[str]
+    eval_teacher_ids: list[str]
+    task: str
+    epochs: int
+    export_threshold: float
+    t_low: float
+    treat_empty_as_negative: bool
+    architecture: str
+
+
+_OPTIMIZE_QUEUE: "queue.Queue[Optional[_OptimizeJob]]" = queue.Queue()
+_WORKER_LOCK = threading.Lock()
+_WORKER_THREAD: Optional[threading.Thread] = None
+_WORKER_BUSY = threading.Event()
+
+
+def _is_worker_busy() -> bool:
+    return _WORKER_BUSY.is_set()
+
+
+def ensure_optimize_worker_started() -> None:
+    """Idempotent — spawn the singleton optimize worker if not alive.
+
+    Mirrors `pipeline.student_run.ensure_student_run_worker_started`. Called
+    by the server's lifespan startup hook and as a safety net inside
+    `run_optimize_in_background`.
+    """
+    global _WORKER_THREAD
+    with _WORKER_LOCK:
+        if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
+            return
+        _WORKER_THREAD = threading.Thread(
+            target=_worker_loop,
+            name="moderncv-optimize-worker",
+            daemon=True,
+        )
+        _WORKER_THREAD.start()
+        log.info("optimize worker thread started")
+
+
+def stop_optimize_worker(timeout: float = 2.0) -> None:
+    global _WORKER_THREAD
+    with _WORKER_LOCK:
+        th = _WORKER_THREAD
+        if th is None or not th.is_alive():
+            return
+    try:
+        _OPTIMIZE_QUEUE.put_nowait(None)
+    except Exception:
+        pass
+    th.join(timeout=timeout)
+
+
+def _worker_loop() -> None:
+    while True:
+        job = _OPTIMIZE_QUEUE.get()
+        if job is None:
+            log.info("optimize worker received shutdown sentinel")
+            _OPTIMIZE_QUEUE.task_done()
+            break
+        _WORKER_BUSY.set()
+        try:
+            _execute_job(job)
+        except Exception:
+            log.exception("queued optimize job crashed: %s", job.rdir.name)
+        finally:
+            _WORKER_BUSY.clear()
+            _OPTIMIZE_QUEUE.task_done()
+
+
+def _execute_job(job: _OptimizeJob) -> None:
+    """Pop-and-run. Flips manifest queued → running, drives distillation,
+    flips to completed/failed via the existing helpers."""
+    manifest_path = job.rdir / runs_mod.MANIFEST_NAME
+    if not manifest_path.exists():
+        log.info("skipping optimize job — dir deleted: %s", job.rdir)
+        return
+    try:
+        manifest = runs_mod.read_student_manifest(job.rdir)
+    except Exception as e:
+        log.warning("could not read student manifest at %s: %s", job.rdir, e)
+        return
+    if manifest.status not in ("queued", "running"):
+        log.info(
+            "skipping optimize job %s — status is %s",
+            job.rdir.name,
+            manifest.status,
+        )
+        return
+
+    manifest.status = "running"
+    runs_mod.write_student_manifest(job.rdir, manifest)
+
+    try:
+        _run_distillation(
+            project_id=job.project_id,
+            rdir=job.rdir,
+            train_teacher_ids=job.train_teacher_ids,
+            eval_teacher_ids=job.eval_teacher_ids,
+            task=job.task,
+            epochs=job.epochs,
+            export_threshold=job.export_threshold,
+            t_low=job.t_low,
+            treat_empty_as_negative=job.treat_empty_as_negative,
+            architecture=job.architecture,
+        )
+    except Exception as e:
+        log.exception("optimize job crashed: %s", job.rdir.name)
+        try:
+            runs_mod.mark_student_failed(job.rdir, str(e))
+        except Exception:
+            pass
 
 
 # ---- The actual distillation flow -----------------------------------------
@@ -343,8 +475,41 @@ def _run_distillation(
     # --- Phase 2: train ----------------------------------------------------
     progress("running", f"Training {architecture} for {epochs} epochs", 0, epochs)
 
+    # Track wall-clock per epoch so the GUI can render an ETA. Ultralytics
+    # fires the callback after each epoch, so the time between consecutive
+    # callbacks is the time *that* epoch took. We keep an exponential
+    # moving average over the last few epochs — early epochs are often
+    # slower (kernel warmup, AMP autotune) and using the running mean
+    # lets the ETA settle quickly.
+    train_t0 = time.perf_counter()
+    epoch_times: list[float] = []
+
     def _epoch_progress(epoch: int, total: int) -> None:
-        progress("running", f"Training epoch {epoch}/{total}", epoch, total)
+        elapsed = time.perf_counter() - train_t0
+        # Time for *this* epoch = total elapsed minus the sum of all
+        # previously recorded epoch times.
+        prior = sum(epoch_times)
+        this_epoch_seconds = max(0.0, elapsed - prior)
+        epoch_times.append(this_epoch_seconds)
+        # Average over last min(8, len) epochs so the ETA isn't dragged
+        # down forever by an unusually slow first epoch.
+        window = epoch_times[-8:]
+        avg = sum(window) / len(window) if window else 0.0
+        runs_mod.write_progress(
+            rdir,
+            runs_mod.RunProgress(
+                stage="running",
+                message=f"Training epoch {epoch}/{total}",
+                current_frame=epoch,
+                total_frames=total,
+                frames_with_detections=0,
+                started_at=started_at,
+                updated_at=_now_iso(),
+                current_epoch=epoch,
+                total_epochs=total,
+                epoch_seconds_avg=avg,
+            ),
+        )
 
     train_result = trainer.train(
         data_yaml=summary.data_yaml,
@@ -377,7 +542,24 @@ def _run_distillation(
                     eval_teacher_id=etid,
                     class_names=summary.class_names,
                 )
-                map50, map5095 = trainer.eval(weights=weights, data_yaml=eval_yaml)
+                map50, map5095, per_class = trainer.eval(
+                    weights=weights, data_yaml=eval_yaml
+                )
+                # Render N comparison frames (Student red vs Teacher
+                # green) so the user can eyeball *why* mAP is what it
+                # is. Failures here are non-fatal — the eval already
+                # produced its number; samples are a value-add.
+                try:
+                    eval_root = rdir / "dataset" / "eval" / etid
+                    samples_out = rdir / "samples" / etid
+                    sample_render.render_eval_samples(
+                        weights=weights,
+                        eval_dir=eval_root,
+                        class_names=summary.class_names,
+                        out_dir=samples_out,
+                    )
+                except Exception as e:
+                    log.warning("sample render failed for %s: %s", etid, e)
             except Exception as e:
                 # One bad eval teacher (e.g. missing source video) shouldn't
                 # tank the whole run — record a zero row and carry on. The
@@ -390,6 +572,7 @@ def _run_distillation(
                     "n_annotations": 0,
                     "map50": 0.0,
                     "map50_95": 0.0,
+                    "per_class": None,
                     "error": str(e),
                 })
                 continue
@@ -399,6 +582,7 @@ def _run_distillation(
                 "n_annotations": n_anns,
                 "map50": map50,
                 "map50_95": map5095,
+                "per_class": per_class or None,
             })
             log.info(
                 "Eval teacher %s: %d images, mAP@0.5=%.3f, mAP@0.5:0.95=%.3f",

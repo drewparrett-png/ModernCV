@@ -442,7 +442,9 @@ def _compute_map_against_teacher(
         class_names=class_names,
     )
     trainer = make_trainer(architecture)
-    map50, map5095 = trainer.eval(weights=weights_path, data_yaml=data_yaml)
+    map50, map5095, _per_class = trainer.eval(
+        weights=weights_path, data_yaml=data_yaml
+    )
     return float(map50), float(map5095)
 
 
