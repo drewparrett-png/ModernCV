@@ -46,9 +46,10 @@ interface UndoEntry {
 
 interface Props {
   onClose: () => void;
+  threshold?: number;
 }
 
-export function CropReview({ onClose }: Props) {
+export function CropReview({ onClose, threshold = 0 }: Props) {
   const projectId = useStore((s) => s.currentProjectId);
   const runId = useStore((s) => s.inspectingRunId);
 
@@ -71,7 +72,7 @@ export function CropReview({ onClose }: Props) {
       fetchFrameStates(projectId, runId),
     ])
       .then(([resp, fs]) => {
-        setDetections(resp.detections);
+        setDetections(resp.detections.filter((d) => d.score >= threshold));
         setFrameStates(fs);
         setIndex(0);
         setLoaded(true);
