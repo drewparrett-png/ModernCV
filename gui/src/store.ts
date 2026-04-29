@@ -470,6 +470,28 @@ export const useStore = create<State>((set, get) => ({
       if (!seen.has(id)) delete next[id];
     }
     set({ studentDetails: next });
+
+    // The list endpoint returns manifests only; polling only runs for queued/running.
+    // Eagerly fetch details for terminal students that have no stats yet so Compare works.
+    const needsDetail = Object.values(next).filter(
+      (d) =>
+        (d.manifest.status === "completed" || d.manifest.status === "failed") &&
+        d.stats === null,
+    );
+    if (needsDetail.length > 0) {
+      await Promise.all(
+        needsDetail.map(async (d) => {
+          try {
+            const detail = await fetchStudentDetail(pid, d.manifest.id);
+            useStore.setState((s) => ({
+              studentDetails: { ...s.studentDetails, [d.manifest.id]: detail },
+            }));
+          } catch (e) {
+            console.error("failed to load student detail", d.manifest.id, e);
+          }
+        }),
+      );
+    }
   },
 
   async startOptimize(req) {
