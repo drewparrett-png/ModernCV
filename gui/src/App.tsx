@@ -38,7 +38,10 @@ export default function App() {
           }
         }
         for (const [id, d] of Object.entries(studentDetails)) {
-          if (d.manifest.status === "running") {
+          if (
+            d.manifest.status === "running" ||
+            d.manifest.status === "queued"
+          ) {
             startStudentPoll(currentProjectId, id);
           }
         }

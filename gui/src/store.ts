@@ -490,7 +490,7 @@ export const useStore = create<State>((set, get) => ({
       studentDetails: { ...get().studentDetails, [initial.manifest.id]: initial },
       selectedStudentId: initial.manifest.id,
     });
-    if (initial.manifest.status === "running") {
+    if (initial.manifest.status === "running" || initial.manifest.status === "queued") {
       _startStudentPoll(pid, initial.manifest.id);
     }
     return initial.manifest.id;
@@ -583,27 +583,39 @@ function _startTeacherPoll(projectId: string, id: string, fast = false): void {
   }));
 }
 
-function _startStudentPoll(projectId: string, id: string): void {
+function _startStudentPoll(projectId: string, id: string, fast = false): void {
   const existing = useStore.getState().studentPolls[id];
   if (existing) return;
 
-  const handle = setInterval(async () => {
+  const intervalMs = fast ? POLL_MS : QUEUED_POLL_MS;
+  let handle: ReturnType<typeof setInterval>;
+  handle = setInterval(async () => {
     try {
       const latest = await fetchStudentDetail(projectId, id);
       useStore.setState((s) => ({
         studentDetails: { ...s.studentDetails, [id]: latest },
       }));
-      if (latest.manifest.status !== "running") {
-        const polls = useStore.getState().studentPolls;
-        if (polls[id]) clearInterval(polls[id]);
-        const next = { ...polls };
-        delete next[id];
-        useStore.setState({ studentPolls: next });
+      const status = latest.manifest.status;
+      if (status !== "queued" && status !== "running") {
+        clearInterval(handle);
+        useStore.setState((s) => {
+          const next = { ...s.studentPolls };
+          delete next[id];
+          return { studentPolls: next };
+        });
+      } else if (status === "running" && !fast) {
+        clearInterval(handle);
+        useStore.setState((s) => {
+          const next = { ...s.studentPolls };
+          delete next[id];
+          return { studentPolls: next };
+        });
+        _startStudentPoll(projectId, id, true);
       }
     } catch (e) {
       console.error("student poll failed", e);
     }
-  }, POLL_MS);
+  }, intervalMs);
   useStore.setState((s) => ({
     studentPolls: { ...s.studentPolls, [id]: handle },
   }));
