@@ -27,36 +27,71 @@ Additionally, there is no UI signal that partial human labels feed into student 
 
 A full-width colored strip is rendered above the crop image inside the `CropReview` component. One segment per entry in `liveDetections` (same order as navigation, `score_asc`).
 
-**Segment colors:**
-| State | Color |
+**Segment colors — tri-state:** `liveDetections[i].accepted` collapses two distinct cases into `true` — a frame with no state entry (unreviewed) and a frame with a `curated` entry where this detection is accepted. To distinguish them, compute a `stripColors` array in the parent before passing to `LabelStrip`:
+
+```ts
+type SegColor = 'accepted' | 'rejected' | 'unreviewed';
+
+const stripColors = useMemo<SegColor[]>(
+  () =>
+    liveDetections.map(d => {
+      const entry = frameStates[String(d.frame_idx)];
+      if (!entry) return 'unreviewed';
+      return d.accepted ? 'accepted' : 'rejected';
+    }),
+  [liveDetections, frameStates],
+);
+```
+
+| `SegColor` | Display |
 |---|---|
-| Frame `curated`, `det_idx` not in `rejected_dets` | Green (accepted) |
-| Frame `curated`, `det_idx` in `rejected_dets` | Red (rejected) |
-| Frame `confirmed_empty` or `marked_missed` | Red |
-| No frame state (unreviewed) | Gray |
+| `'unreviewed'` | Gray |
+| `'accepted'` | Green |
+| `'rejected'` | Red |
+
+Frames in `confirmed_empty` or `marked_missed` states have no detections and therefore no entries in `liveDetections`; they never appear in the strip.
 
 **Current position:** a thin white vertical cursor rule inside the strip segment at `index`.
 
-**Click to navigate:** `onClick` computes `Math.floor((clickX / stripWidth) * total)` and calls `setIndex(i)`. No image loading required — the strip colors come from `liveDetections` and `frameStates` which are already in local state.
+**Click to navigate:** `onClick` computes the target index and calls `setIndex`:
+
+```ts
+const i = Math.min(total - 1, Math.floor((clickX / stripWidth) * total));
+setIndex(i);
+```
+
+The `Math.min(total - 1, ...)` clamp prevents an off-by-one on right-edge clicks.
 
 **Rendering at scale:** each segment uses `flex: 1 0 auto; min-width: 2px` in a `display: flex` container so segments compress proportionally at hundreds of crops without a scrollbar.
 
-**Implementation location:** new `<LabelStrip>` sub-component inside `CropReview.tsx`, rendered just above the main crop image. Uses `useMemo` keyed on `[liveDetections, frameStates, index]` to compute the color array.
+**Implementation:** new `LabelStrip` component defined in `CropReview.tsx` using `React.memo`. Props: `colors: SegColor[]`, `index: number`, `onJump: (i: number) => void`. The parent passes `stripColors` and `index`; `LabelStrip` does not need `frameStates` or `liveDetections` directly.
+
+```tsx
+const LabelStrip = React.memo(function LabelStrip({
+  colors, index, onJump,
+}: { colors: SegColor[]; index: number; onJump: (i: number) => void }) {
+  // render one <span> per color, highlight segment at `index`
+});
+```
 
 ---
 
 ### 2. Auto-jump + resume toast in `CropReview.tsx`
 
-**Auto-jump:** In the `Promise.all([fetchDetections, fetchFrameStates])` `.then()` handler (currently line 74–79 of `CropReview.tsx`), replace the hard-coded `setIndex(0)` with:
+**Auto-jump:** In the `Promise.all([fetchDetections, fetchFrameStates])` `.then()` handler (currently lines 74–79 of `CropReview.tsx`), replace the hard-coded `setIndex(0)` with the snippet below. Also add `threshold` to the `useEffect` dependency array (currently `[projectId, runId]`) so the effect re-runs if the threshold prop changes after mount.
 
 ```ts
 const dets = resp.detections.filter(d => d.score >= threshold);
 const firstUnlabeled = dets.findIndex(d => !fs[String(d.frame_idx)]);
-const startIdx = firstUnlabeled >= 0 ? firstUnlabeled : 0;
+// findIndex returns -1 when all crops are labeled → fall back to 0
+const startIdx = firstUnlabeled > 0 ? firstUnlabeled : 0;
 setIndex(startIdx);
 ```
 
-If `startIdx > 0`, also set a resume toast.
+Toast is only shown when `firstUnlabeled > 0` — this correctly covers three cases:
+- `findIndex === -1`: all crops are labeled, `startIdx` falls back to 0, no toast (nothing to resume).
+- `findIndex === 0`: the very first crop is unlabeled, meaning the session was never advanced at all — the viewer lands at 0 and no toast is needed because there is nothing to resume *from*.
+- `findIndex > 0`: the user had labeled some crops and stopped — auto-jump + toast fires.
 
 **Resume toast:** New `const [resumeToast, setResumeToast] = useState<string | null>(null)`. Message format:
 
@@ -64,28 +99,39 @@ If `startIdx > 0`, also set a resume toast.
 
 where `N = firstUnlabeled + 1` (1-indexed) and `X = dets.filter(d => !fs[String(d.frame_idx)]).length`.
 
-Toast renders as a small overlay inside the crop area, fades out after 3 seconds via `useEffect(() => { const t = setTimeout(() => setResumeToast(null), 3000); return () => clearTimeout(t); }, [resumeToast])`.
+Toast renders as a small overlay inside the crop area. It disappears after 3 seconds — instant removal (no CSS fade), set via:
 
-Toast only appears when `firstUnlabeled > 0` (there's actually something to resume from).
+```ts
+useEffect(() => {
+  if (!resumeToast) return;
+  const t = setTimeout(() => setResumeToast(null), 3000);
+  return () => clearTimeout(t);
+}, [resumeToast]);
+```
+
+Add `.crop-resume-toast` styles: `position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; pointer-events: none; z-index: 10`.
 
 ---
 
 ### 3. Stale stats fix in `RunInspector.tsx`
 
-**Root cause:** When `CropReview` closes, `RunInspector` already calls `fetchRunDetail` and `fetchFrameStates` to refresh its own local state (lines 347–361 of `RunInspector.tsx`). But the global Zustand `teacherDetails` store — which drives the Teacher run cards in `Learn.tsx` — is never updated, because polling stopped when the run reached `"completed"`.
+**Root cause:** When `CropReview` closes, `RunInspector` already calls `fetchRunDetail` and `fetchFrameStates` to refresh its own local state (lines 347–361 of `RunInspector.tsx`). The calls are fire-and-forget with separate `.then`/`.catch` chains — not chained together. The global Zustand `teacherDetails` store — which drives the Teacher run cards in `Learn.tsx` — is never updated, because polling stopped when the run reached `"completed"`.
 
-**Fix:** In the existing `onClose` callback's `fetchRunDetail(...).then(d => setDetail(d))` chain, also push `d` into the global store:
+**Fix:** Restructure the `fetchRunDetail` block inside `onClose` to also push `d` to the global store:
 
 ```ts
-.then((d) => {
-  setDetail(d);
-  useStore.setState(s => ({
-    teacherDetails: { ...s.teacherDetails, [runId]: d },
-  }));
-})
+// Replace the existing fetchRunDetail block:
+fetchRunDetail(projectId, runId)
+  .then((d) => {
+    setDetail(d);
+    useStore.setState(s => ({
+      teacherDetails: { ...s.teacherDetails, [runId]: d },
+    }));
+  })
+  .catch(() => { /* non-fatal */ });
 ```
 
-No new store action needed — the `useStore.setState` pattern is already used elsewhere in the store.
+The `fetchFrameStates` block in the same `onClose` is unchanged. `useStore` is already imported in `RunInspector.tsx`.
 
 ---
 
@@ -93,21 +139,21 @@ No new store action needed — the `useStore.setState` pattern is already used e
 
 **Context:** The student creation dialog in `Optimize.tsx` renders a `TeacherPicker` list of `RunDetail[]` (from the `teacherDetails` store). Each row already shows task pill and prompt. No API change is needed — `RunDetail.manifest` already carries `n_frames_reviewed`, `n_frames_total`, and `review_status`.
 
-**Change:** Inside the teacher-picker row metadata block (around lines 532–542), add a label badge alongside the existing task pill:
+**Change:** Inside the teacher-picker row metadata block (around lines 532–542 of `Optimize.tsx`), add a review badge that uses the same wording as `Learn.tsx` ("reviewed", not "labeled") for UI consistency:
 
 ```tsx
 {t.manifest.review_status !== "unreviewed" && (
   <span className="teacher-picker-review-badge">
     {t.manifest.review_status === "approved"
-      ? "Fully labeled"
-      : `${t.manifest.n_frames_reviewed} / ${t.manifest.n_frames_total} labeled`}
+      ? "Fully curated"
+      : `${t.manifest.n_frames_reviewed}/${t.manifest.n_frames_total} reviewed`}
   </span>
 )}
 ```
 
-This makes it immediately visible how much human-curated data each teacher contributes to the upcoming training run.
+The wording mirrors `Learn.tsx` lines 233–235 exactly ("Fully curated" / "N/total reviewed").
 
-The `Learn.tsx` run cards already display the same information (lines 230–237) via the existing `curation-pill` — no change needed there; the stale-data fix in §3 is sufficient.
+The `Learn.tsx` run cards already display the same information via the existing `curation-pill` — no change needed there; the stale-data fix in §3 is sufficient.
 
 ---
 
@@ -115,10 +161,10 @@ The `Learn.tsx` run cards already display the same information (lines 230–237)
 
 | File | Change |
 |---|---|
-| `gui/src/components/CropReview.tsx` | Add `LabelStrip` sub-component; change `setIndex(0)` to auto-jump; add resume toast state + display |
-| `gui/src/components/RunInspector.tsx` | In CropReview `onClose`, push refreshed `RunDetail` to global `teacherDetails` store |
+| `gui/src/components/CropReview.tsx` | Add `LabelStrip` sub-component; replace `setIndex(0)` with auto-jump; add resume toast state + display |
+| `gui/src/components/RunInspector.tsx` | Restructure `fetchRunDetail` block in `onClose` to also push fresh `RunDetail` to global `teacherDetails` store |
 | `gui/src/modes/Optimize.tsx` | Add `teacher-picker-review-badge` span to teacher picker rows |
-| `gui/src/App.css` (or component CSS) | Add styles for `.crop-label-strip`, `.strip-seg`, `.strip-seg-accepted`, `.strip-seg-rejected`, `.strip-cursor`, `.crop-resume-toast`, `.teacher-picker-review-badge` |
+| `gui/src/index.css` | Add styles for `.crop-label-strip`, `.strip-seg`, `.strip-seg-accepted`, `.strip-seg-rejected`, `.strip-cursor`, `.crop-resume-toast`, `.teacher-picker-review-badge` |
 
 No backend changes. No new API endpoints.
 
@@ -127,22 +173,24 @@ No backend changes. No new API endpoints.
 ## Verification
 
 1. **Progress strip:**
-   - Open CropReview on a run with some frames already labeled.
-   - Confirm strip shows green/red/gray segments proportional to detection count.
+   - Open CropReview on a run with some frames already labeled (perform a few accept/reject actions first to create server-side frame state).
+   - Confirm strip shows green/red/gray segments in the same order as detection navigation.
    - Click a gray segment — confirm viewer jumps to that crop.
    - Accept a crop — confirm the corresponding strip segment turns green without page reload.
 
 2. **Auto-jump + toast:**
-   - Close CropReview mid-session, reopen.
+   - Label a few crops, close CropReview, reopen it.
    - Confirm viewer lands on the first unlabeled crop (not crop 0).
-   - Confirm toast "Resumed from crop N · X unlabeled remaining" appears and fades after ~3 s.
-   - Open a fully-labeled run — confirm no toast, starts at 0.
+   - Confirm toast "Resumed from crop N · X unlabeled remaining" appears and disappears after ~3 s.
+   - Open a fully-labeled run — confirm no toast, viewer starts at 0.
+   - Open an unlabeled run (crop 0 is unlabeled) — confirm no toast, viewer starts at 0.
 
 3. **Stats refresh:**
-   - Label a few crops, close CropReview.
-   - Without reloading, confirm the Teacher run card in Learn.tsx immediately shows the updated "N / total reviewed" count.
+   - Label a few crops via CropReview, then close it.
+   - Without reloading the page, confirm the Teacher run card in `Learn.tsx` immediately shows the updated "N / total reviewed" count.
 
 4. **Human-label badge (Optimize):**
-   - Navigate to Optimize → select a teacher run that has partial labeling.
-   - Confirm the teacher-picker row shows "N / total labeled" badge.
-   - Confirm a fully-labeled run shows "Fully labeled".
+   - Navigate to Optimize → teacher picker.
+   - Select a teacher run with partial labeling — confirm row shows "N / total reviewed" badge.
+   - Select a fully-labeled run — confirm row shows "Fully curated".
+   - Select an unlabeled run — confirm no badge appears.
