@@ -96,6 +96,7 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
   const [index, setIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [resumeToast, setResumeToast] = useState<string | null>(null);
 
   // Action history for U-key undo. Bounded so a long session doesn't
   // grow unbounded — 50 is plenty for "I just hit the wrong key" recovery.
@@ -105,18 +106,39 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
     if (!projectId || !runId) return;
     setError(null);
     setLoaded(false);
+    setResumeToast(null);
     Promise.all([
       fetchDetections(projectId, runId, { sort: "score_asc" }),
       fetchFrameStates(projectId, runId),
     ])
       .then(([resp, fs]) => {
-        setDetections(resp.detections.filter((d) => d.score >= threshold));
+        const dets = resp.detections.filter((d) => d.score >= threshold);
+        const firstUnlabeled = dets.findIndex((d) => !fs[String(d.frame_idx)]);
+        // -1 → all labeled, start at 0, no toast
+        //  0 → session never started, start at 0, no toast
+        // >0 → mid-session, jump to first unlabeled + show toast
+        const startIdx = firstUnlabeled > 0 ? firstUnlabeled : 0;
+        setDetections(dets);
         setFrameStates(fs);
-        setIndex(0);
+        setIndex(startIdx);
         setLoaded(true);
+        if (firstUnlabeled > 0) {
+          const unlabeledCount = dets.filter(
+            (d) => !fs[String(d.frame_idx)],
+          ).length;
+          setResumeToast(
+            `Resumed from crop ${firstUnlabeled + 1} · ${unlabeledCount} unlabeled remaining`,
+          );
+        }
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [projectId, runId]);
+  }, [projectId, runId, threshold]);
+
+  useEffect(() => {
+    if (!resumeToast) return;
+    const t = setTimeout(() => setResumeToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [resumeToast]);
 
   // Live `accepted` view: derived from `frameStates`, not from the static
   // server response. The server snapshot is the initial state; subsequent
@@ -367,6 +389,9 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
               >
                 {cur.accepted ? "Accepted" : "Rejected"}
               </div>
+              {resumeToast && (
+                <div className="crop-resume-toast">{resumeToast}</div>
+              )}
             </div>
             <aside className="crop-review-sidebar">
               <div className="crop-review-meta">
