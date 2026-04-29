@@ -180,6 +180,14 @@ function TeacherRowHeader({
         <span className={`status-pill status-${manifest.status}`}>
           {manifest.status}
         </span>
+        {manifest.status === "completed" &&
+          manifest.review_status !== "unreviewed" && (
+            <span className={`curation-pill curation-${manifest.review_status}`}>
+              {manifest.review_status === "approved"
+                ? "Fully curated"
+                : `${manifest.n_frames_reviewed}/${manifest.n_frames_total} reviewed`}
+            </span>
+          )}
         <span className="teacher-row-time mono">
           {manifest.started_at.replace("T", " ").replace("Z", "")}
         </span>
@@ -276,6 +284,17 @@ function TeacherRowDetail({
             </dd>
           </>
         )}
+        {manifest.status === "completed" &&
+          manifest.review_status !== "unreviewed" && (
+            <>
+              <dt>Curation</dt>
+              <dd>
+                {manifest.review_status === "approved"
+                  ? "Fully curated"
+                  : `${manifest.n_frames_reviewed} / ${manifest.n_frames_total} frames reviewed`}
+              </dd>
+            </>
+          )}
         {manifest.error && (
           <>
             <dt>Error</dt>

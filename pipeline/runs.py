@@ -678,6 +678,22 @@ def _count_processed_frames(rdir: Path) -> int:
     return 0
 
 
+def derive_review_progress(rdir: Path) -> tuple[str, int, int]:
+    """Return (review_status, n_reviewed, n_total) from a single disk read.
+
+    Prefer this over `derive_review_status` when you need the counts too,
+    so `frame_states.json` and the processed-frame count are read once.
+    """
+    states = read_frame_states(rdir)
+    n_reviewed = len(states)
+    n_total = _count_processed_frames(rdir)
+    if n_reviewed == 0:
+        return "unreviewed", 0, n_total
+    if n_total > 0 and n_reviewed >= n_total:
+        return "approved", n_reviewed, n_total
+    return "in_progress", n_reviewed, n_total
+
+
 def derive_review_status(rdir: Path) -> str:
     """Three-state human-review summary computed from disk (Phase 3).
 
@@ -693,13 +709,8 @@ def derive_review_status(rdir: Path) -> str:
     `unset_frame_state` when it drops below — it's not consulted here, the
     file content is.
     """
-    states = read_frame_states(rdir)
-    if not states:
-        return "unreviewed"
-    n_frames = _count_processed_frames(rdir)
-    if n_frames > 0 and len(states) >= n_frames:
-        return "approved"
-    return "in_progress"
+    status, _, _ = derive_review_progress(rdir)
+    return status
 
 
 # ---- Read / list -----------------------------------------------------------
