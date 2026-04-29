@@ -342,6 +342,7 @@ export function RunInspector() {
   if (cropMode) {
     return (
       <CropReview
+        threshold={threshold}
         onClose={() => {
           setCropMode(false);
           if (projectId && runId) {
