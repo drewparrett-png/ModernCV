@@ -36,6 +36,10 @@ import type {
 } from "../types";
 import { Compare } from "./Compare";
 import { StudentRunPanel } from "./StudentRunPanel";
+import { InfoTip } from "../components/InfoTip";
+import { TrainingCurves } from "../components/TrainingCurves";
+import { SamplePredictionsGrid } from "../components/SamplePredictionsGrid";
+import { HELP, mapTier } from "../lib/helpText";
 
 // Confidence-band defaults — keep in lockstep with `OptimizeRequest`'s
 // backend defaults (`server/schemas.py`) so the form's initial submission
@@ -99,11 +103,16 @@ export function Optimize() {
   );
 
   const students = useMemo(() => {
+    // Sort tier: running (0) → queued (1) → completed/failed (2). Within
+    // each tier, newest first. Lets the user spot the live training and
+    // the next-up queued one without scrolling past finished runs.
+    const tier = (s: string) =>
+      s === "running" ? 0 : s === "queued" ? 1 : 2;
     const arr = Object.values(studentDetails);
     arr.sort((a, b) => {
-      const aRunning = a.manifest.status === "running" ? 1 : 0;
-      const bRunning = b.manifest.status === "running" ? 1 : 0;
-      if (aRunning !== bRunning) return bRunning - aRunning;
+      const ta = tier(a.manifest.status);
+      const tb = tier(b.manifest.status);
+      if (ta !== tb) return ta - tb;
       return b.manifest.started_at.localeCompare(a.manifest.started_at);
     });
     return arr;
@@ -240,15 +249,75 @@ function StudentRow({
         </span>
       </div>
       {manifest.status === "running" && progress && (
-        <div className="row-progress indeterminate">
+        progress.current_epoch != null && progress.total_epochs ? (
+          <RowEpochProgress
+            current={progress.current_epoch}
+            total={progress.total_epochs}
+            avgSeconds={progress.epoch_seconds_avg ?? null}
+          />
+        ) : (
+          <div className="row-progress indeterminate">
+            <div className="row-progress-fill" />
+            <span className="row-progress-label">
+              {progress.stage.replace("_", " ")}
+            </span>
+          </div>
+        )
+      )}
+      {manifest.status === "queued" && (
+        <div className="row-progress indeterminate queued">
           <div className="row-progress-fill" />
           <span className="row-progress-label">
-            {progress.stage.replace("_", " ")}
+            Waiting for previous training to finish
           </span>
         </div>
       )}
     </>
   );
+}
+
+/** Determinate epoch progress bar with ETA. Falls back gracefully when
+ *  avgSeconds is null (the very first epoch hasn't completed yet, so we
+ *  show "epoch 1/N · estimating…"). */
+function RowEpochProgress({
+  current,
+  total,
+  avgSeconds,
+}: {
+  current: number;
+  total: number;
+  avgSeconds: number | null;
+}) {
+  const pct = Math.max(0, Math.min(1, current / total)) * 100;
+  let etaLabel = "estimating…";
+  if (avgSeconds && avgSeconds > 0) {
+    const remaining = Math.max(0, total - current) * avgSeconds;
+    etaLabel =
+      `~${formatShortDuration(avgSeconds)} each · ` +
+      (remaining > 0
+        ? `~${formatShortDuration(remaining)} remaining`
+        : "finishing");
+  }
+  return (
+    <div className="row-epoch-progress">
+      <div className="row-progress determinate">
+        <div className="row-progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="row-progress-label">
+        epoch {current}/{total} · {etaLabel}
+      </span>
+    </div>
+  );
+}
+
+/** Compact human-readable duration for the ETA line ("47s", "3m", "1h 12m"). */
+function formatShortDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins - hrs * 60;
+  return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
 }
 
 /**
@@ -638,6 +707,7 @@ function SelectedStudent({
   teacherDetails: Record<string, RunDetail>;
   onInspectTeacher: (teacherId: string) => void;
 }) {
+  const projectId = useStore((s) => s.currentProjectId);
   const { manifest, stats, progress } = detail;
   const trainTeachers = manifest.train_teacher_ids;
   const evalTeachers = manifest.eval_teacher_ids;
@@ -677,123 +747,169 @@ function SelectedStudent({
       )}
       {studentTab === "overview" && (
       <>
-      <div className="result-card">
-        <div className="result-row">
-          <span className="result-key">Run ID</span>
-          <span className="result-value mono">{manifest.id}</span>
-        </div>
-        <div className="result-row">
-          <span className="result-key">Train Teachers</span>
-          <span className="result-value">
-            <TeacherChips
-              ids={trainTeachers}
-              teacherDetails={teacherDetails}
-              onInspect={onInspectTeacher}
-            />
+      {/* ---- Section 1: Identity ---------------------------------------- */}
+      <div className="student-identity">
+        <div className="student-identity-row">
+          <span className={`status-pill status-${manifest.status}`}>
+            {manifest.status}
           </span>
+          <span className="student-identity-arch mono">
+            {manifest.architecture ?? "yolov8n"}
+          </span>
+          {stats && stats.model_size_mb > 0 && (
+            <span className="student-identity-size">
+              {stats.model_size_mb.toFixed(1)} MB
+            </span>
+          )}
+          <span className="student-identity-id mono">{manifest.id}</span>
         </div>
-        <div className="result-row">
-          <span className="result-key">Eval Teachers</span>
-          <span className="result-value">
-            {evalTeachers.length > 0 ? (
+        <div className="student-identity-row student-identity-meta">
+          <span className="muted">Train:</span>
+          <TeacherChips
+            ids={trainTeachers}
+            teacherDetails={teacherDetails}
+            onInspect={onInspectTeacher}
+          />
+          {evalTeachers.length > 0 && (
+            <>
+              <span className="muted">Eval:</span>
               <TeacherChips
                 ids={evalTeachers}
                 teacherDetails={teacherDetails}
                 onInspect={onInspectTeacher}
               />
-            ) : (
-              <span className="muted">— none (no transferability score)</span>
-            )}
-          </span>
+            </>
+          )}
         </div>
-        <div className="result-row">
-          <span className="result-key">Status</span>
-          <span className={`result-value status-${manifest.status}`}>
-            {manifest.status}
-          </span>
+      </div>
+
+      {manifest.error && (
+        <div className="student-error-card">
+          <strong>Error</strong>
+          <span>{manifest.error}</span>
         </div>
-        <div className="result-row">
-          <span className="result-key">Models</span>
-          <span className="result-value mono">
-            {Object.entries(manifest.models)
-              .map(([k, v]) => `${k}=${v}`)
-              .join("  ·  ")}
-          </span>
+      )}
+
+      {/* ---- Section 2: Generalization (held-out) ----------------------- */}
+      {stats && stats.per_eval_teacher.length > 0 && (
+        <div className="student-section">
+          <div className="student-section-head">
+            <h4>
+              Generalization{" "}
+              <InfoTip
+                title={HELP.generalization.title}
+                body={HELP.generalization.body}
+              />
+            </h4>
+            <p className="student-section-sub">
+              How well the Student matches Teachers it was never trained on.
+              Higher = better. mAP @ 0.5 is the headline number; 0.5:0.95 is
+              stricter.
+            </p>
+          </div>
+          <PerEvalTeacherTable
+            rows={stats.per_eval_teacher}
+            teacherDetails={teacherDetails}
+            onInspect={onInspectTeacher}
+          />
+          {projectId && (
+            <SamplePredictionsGrid
+              projectId={projectId}
+              studentId={manifest.id}
+              teacherDetails={teacherDetails}
+              status={manifest.status}
+            />
+          )}
         </div>
-        {/* Architecture row (Phase 1.4). Old manifests predate this field;
-            fall back to "yolov8n" — the only architecture that existed
-            before the dispatcher refactor — so legacy runs still render a
-            sensible value rather than "undefined". */}
-        <div className="result-row">
-          <span className="result-key">Architecture</span>
-          <span className="result-value mono">
-            {manifest.architecture ?? "yolov8n"}
-          </span>
+      )}
+
+      {stats && stats.epochs > 0 && stats.per_eval_teacher.length === 0 && (
+        <div className="student-section student-section-muted">
+          <div className="student-section-head">
+            <h4>Generalization</h4>
+            <p className="student-section-sub muted">
+              No held-out Eval Teachers were picked, so there's no
+              transferability score. Pick at least one Eval Teacher next
+              time to measure how well the Student carries over.
+            </p>
+          </div>
         </div>
-        {stats && stats.epochs > 0 && (
-          <>
-            <div className="result-row">
-              <span className="result-key">Trained on</span>
-              <span className="result-value">
-                {stats.train_images} images · {stats.train_annotations}{" "}
-                annotations · {stats.epochs} epochs ·{" "}
-                {stats.train_seconds.toFixed(1)}s
+      )}
+
+      {/* ---- Section 3: Training data ----------------------------------- */}
+      {stats && stats.epochs > 0 && (
+        <div className="student-section">
+          <div className="student-section-head">
+            <h4>
+              Training data{" "}
+              <InfoTip
+                title={HELP.frame_buckets.title}
+                body={HELP.frame_buckets.body}
+              />
+            </h4>
+            <p className="student-section-sub">
+              How each frame from the Train Teachers was used.
+              Thresholds: export_threshold={stats.export_threshold.toFixed(2)},
+              t_low={stats.t_low.toFixed(2)}
+              {stats.treat_empty_as_negative
+                ? " (treat_empty_as_negative on)"
+                : ""}
+              .
+            </p>
+          </div>
+          <FrameBucketTiles stats={stats} />
+          {stats.per_teacher_buckets.length > 0 && (
+            <PerTrainTeacherBucketExpander
+              rows={stats.per_teacher_buckets}
+              teacherDetails={teacherDetails}
+              onInspect={onInspectTeacher}
+            />
+          )}
+        </div>
+      )}
+
+      {/* ---- Section 4: Training run ------------------------------------ */}
+      {stats && stats.epochs > 0 && (
+        <div className="student-section">
+          <div className="student-section-head">
+            <h4>Training run</h4>
+            <p className="student-section-sub">
+              {stats.train_images} images · {stats.train_annotations} annotations
+              · {stats.epochs} epochs · {formatDuration(stats.train_seconds)}.
+            </p>
+          </div>
+          <div className="student-stat-row">
+            <div className="student-stat">
+              <span className="student-stat-label">
+                Inference latency{" "}
+                <InfoTip
+                  title={HELP.inference_latency.title}
+                  body={HELP.inference_latency.body}
+                  align="left"
+                />
               </span>
-            </div>
-            <FrameBucketsRow stats={stats} />
-            <div className="result-row">
-              <span className="result-key">
-                {stats.per_eval_teacher.length > 0
-                  ? "Mean mAP @ 0.5"
-                  : "mAP @ 0.5"}
-              </span>
-              <span className="result-value">
-                {stats.map50.toFixed(3)}
-                {stats.per_eval_teacher.length > 0 && (
-                  <span className="muted">
-                    {" "}
-                    · {stats.map50_95.toFixed(3)} @ 0.5:0.95
-                  </span>
-                )}
-              </span>
-            </div>
-            <div className="result-row">
-              <span className="result-key">Inference latency</span>
-              <span className="result-value">
+              <span className="student-stat-value">
                 avg {stats.avg_inference_ms.toFixed(1)} ms · p95{" "}
                 {stats.p95_inference_ms.toFixed(1)} ms
               </span>
             </div>
-            <div className="result-row">
-              <span className="result-key">Model size</span>
-              <span className="result-value">
-                {stats.model_size_mb.toFixed(1)} MB
+            <div className="student-stat">
+              <span className="student-stat-label">Models</span>
+              <span className="student-stat-value mono">
+                {Object.entries(manifest.models)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(" · ")}
               </span>
             </div>
-          </>
-        )}
-        {manifest.error && (
-          <div className="result-row">
-            <span className="result-key">Error</span>
-            <span className="result-value error">{manifest.error}</span>
           </div>
-        )}
-      </div>
-
-      {stats && stats.per_eval_teacher.length > 0 && (
-        <PerEvalTeacherTable
-          rows={stats.per_eval_teacher}
-          teacherDetails={teacherDetails}
-          onInspect={onInspectTeacher}
-        />
-      )}
-
-      {stats && stats.per_teacher_buckets.length > 0 && (
-        <PerTrainTeacherBucketTable
-          rows={stats.per_teacher_buckets}
-          teacherDetails={teacherDetails}
-          onInspect={onInspectTeacher}
-        />
+          {projectId && (
+            <TrainingCurves
+              projectId={projectId}
+              studentId={manifest.id}
+              status={manifest.status}
+            />
+          )}
+        </div>
       )}
 
       {manifest.status === "running" && progress && (
@@ -813,6 +929,17 @@ function SelectedStudent({
       )}
     </section>
   );
+}
+
+/** Format a duration in seconds as "1h 23m" / "5m 12s" / "47s". */
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds.toFixed(0)}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds - mins * 60);
+  if (mins < 60) return `${mins}m ${secs}s`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins - hrs * 60;
+  return `${hrs}h ${remMins}m`;
 }
 
 /**
@@ -837,66 +964,130 @@ function PerEvalTeacherTable({
   teacherDetails: Record<string, RunDetail>;
   onInspect: (id: string) => void;
 }) {
-  const mapClass = (m: number): string => {
-    if (m >= 0.7) return "map-good";
-    if (m >= 0.4) return "map-okay";
-    return "map-poor";
-  };
   return (
     <div className="per-eval-table">
       <div className="per-eval-table-head">
         <span>Held-out Teacher</span>
         <span>Images</span>
-        <span>mAP @ 0.5</span>
+        <span>
+          mAP @ 0.5{" "}
+          <InfoTip title={HELP.map.title} body={HELP.map.body} align="left" />
+        </span>
         <span>mAP @ 0.5:0.95</span>
       </div>
-      {rows.map((r) => {
-        const t = teacherDetails[r.teacher_id];
-        const label = t?.manifest.prompt ?? r.teacher_id.replace("teacher_", "");
-        return (
-          <div key={r.teacher_id} className="per-eval-row">
-            <button
-              type="button"
-              className="teacher-chip"
-              title={`Inspect ${r.teacher_id}`}
-              onClick={() => onInspect(r.teacher_id)}
-            >
-              {label}
-            </button>
-            <span className="per-eval-num">{r.n_images}</span>
-            <span className={`per-eval-num ${mapClass(r.map50)}`}>
-              {r.error ? "—" : r.map50.toFixed(3)}
-            </span>
-            <span className={`per-eval-num ${mapClass(r.map50_95)}`}>
-              {r.error ? "—" : r.map50_95.toFixed(3)}
-            </span>
-            {r.error && (
-              <div className="per-eval-error">⚠ {r.error}</div>
-            )}
-          </div>
-        );
-      })}
+      {rows.map((r) => (
+        <PerEvalTeacherRow
+          key={r.teacher_id}
+          row={r}
+          teacherDetails={teacherDetails}
+          onInspect={onInspect}
+        />
+      ))}
     </div>
   );
 }
 
+/** One row of the per-eval-teacher table. Pulled out as its own
+ *  component so it can host its own open/closed state for the
+ *  per-class expander without forcing the parent table to track a
+ *  set of expanded ids. */
+function PerEvalTeacherRow({
+  row,
+  teacherDetails,
+  onInspect,
+}: {
+  row: import("../types").PerEvalTeacherStat;
+  teacherDetails: Record<string, RunDetail>;
+  onInspect: (id: string) => void;
+}) {
+  const t = teacherDetails[row.teacher_id];
+  const label = t?.manifest.prompt ?? row.teacher_id.replace("teacher_", "");
+  const perClass = row.per_class && Object.keys(row.per_class).length > 1
+    ? row.per_class
+    : null;
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="per-eval-row">
+        <span className="per-eval-name-cell">
+          {perClass && (
+            <button
+              type="button"
+              className={`per-eval-chevron ${open ? "open" : ""}`}
+              aria-label={open ? "Hide per-class" : "Show per-class"}
+              onClick={() => setOpen((v) => !v)}
+            >
+              ▸
+            </button>
+          )}
+          <button
+            type="button"
+            className="teacher-chip"
+            title={`Inspect ${row.teacher_id}`}
+            onClick={() => onInspect(row.teacher_id)}
+          >
+            {label}
+          </button>
+        </span>
+        <span className="per-eval-num">{row.n_images}</span>
+        <MapCell value={row.map50} error={row.error} />
+        <MapCell value={row.map50_95} error={row.error} />
+        {row.error && <div className="per-eval-error">⚠ {row.error}</div>}
+      </div>
+      {open && perClass && (
+        <>
+          {Object.entries(perClass)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([cname, m]) => (
+              <div key={cname} className="per-eval-row per-class-row">
+                <span className="per-eval-class-label">{cname}</span>
+                <span className="per-eval-num muted">—</span>
+                <MapCell value={m.map50} />
+                <MapCell value={m.map50_95} />
+              </div>
+            ))}
+        </>
+      )}
+    </>
+  );
+}
+
+/** A mAP value with a 0→1 scale bar underneath. The bar makes the
+ *  number's position on the scale immediately obvious — easier to read
+ *  than a raw decimal. Color matches the tier (poor/okay/good). */
+function MapCell({
+  value,
+  error,
+}: {
+  value: number;
+  error?: string;
+}) {
+  if (error) {
+    return <span className="per-eval-num">—</span>;
+  }
+  const tier = mapTier(value);
+  const pct = Math.max(0, Math.min(1, value)) * 100;
+  return (
+    <span className={`per-eval-num map-cell map-${tier}`}>
+      <span className="map-num">{value.toFixed(3)}</span>
+      <span className="map-bar">
+        <span className="map-bar-fill" style={{ width: `${pct}%` }} />
+      </span>
+    </span>
+  );
+}
+
 /**
- * Frame buckets row on the Student detail card (Phase 0.5).
+ * Three labeled tiles showing how the trainer classified each frame
+ * from the Train Teachers. Replaces the old single-line "X positive · Y
+ * uncertain · Z true negatives" treatment which packed too much jargon
+ * into one row.
  *
- *   Frame buckets   432 positive · 87 uncertain (dropped) · 156 true negatives
- *                                                            (export_threshold=0.30, t_low=0.15)
- *
- * Old runs (pre-Phase-0) come back from the backend with all the bucket
- * counts defaulted to 0 and `per_teacher_buckets = []`. Render an em-dash
- * placeholder rather than a row of zeros — zeros would look like "we
- * trained on nothing" which is wrong.
- *
- * "Run was completed but had no positive/uncertain/negative frames" is
- * not a state Phase 0 can produce (the trainer would have failed at
- * `prepare_yolo_dataset`), so we treat all-zero as "legacy run, no
- * breakdown captured" rather than "ran but produced 0 frames".
+ * Pre-Phase-0 runs back-fill all three counts as 0; render a muted
+ * placeholder rather than a row of zeros which would falsely suggest
+ * the trainer saw no frames.
  */
-function FrameBucketsRow({
+function FrameBucketTiles({
   stats,
 }: {
   stats: import("../types").StudentStats;
@@ -908,38 +1099,66 @@ function FrameBucketsRow({
     stats.per_teacher_buckets.length > 0;
   if (!hasBreakdown) {
     return (
-      <div className="result-row">
-        <span className="result-key">Frame buckets</span>
-        <span className="result-value muted">— (legacy run, no breakdown)</span>
+      <div className="frame-bucket-empty muted">
+        — (legacy run, no breakdown captured)
       </div>
     );
   }
   return (
-    <div className="result-row">
-      <span className="result-key">Frame buckets</span>
-      <span className="result-value">
-        {stats.n_positive_frames} positive ·{" "}
-        {stats.n_uncertain_dropped} uncertain (dropped) ·{" "}
-        {stats.n_true_negative_frames} true negatives{" "}
-        <span className="muted">
-          (export_threshold={stats.export_threshold.toFixed(2)}, t_low={stats.t_low.toFixed(2)}
-          {stats.treat_empty_as_negative ? ", treat_empty_as_negative" : ""})
-        </span>
+    <div className="frame-bucket-tiles">
+      <FrameBucketTile
+        label="Used as positives"
+        count={stats.n_positive_frames}
+        help={HELP.positives}
+        kind="positive"
+      />
+      <FrameBucketTile
+        label="Skipped — uncertain"
+        count={stats.n_uncertain_dropped}
+        help={HELP.uncertain_skipped}
+        kind="uncertain"
+      />
+      <FrameBucketTile
+        label="Used as negatives"
+        count={stats.n_true_negative_frames}
+        help={HELP.true_negatives}
+        kind="negative"
+      />
+    </div>
+  );
+}
+
+function FrameBucketTile({
+  label,
+  count,
+  help,
+  kind,
+}: {
+  label: string;
+  count: number;
+  help: { title: string; body: string };
+  kind: "positive" | "uncertain" | "negative";
+}) {
+  return (
+    <div className={`frame-bucket-tile bucket-${kind}`}>
+      <span className="frame-bucket-count">{count}</span>
+      <span className="frame-bucket-label">
+        {label} <InfoTip title={help.title} body={help.body} />
       </span>
     </div>
   );
 }
 
 /**
- * Per-train-teacher bucket table (Phase 0.5).
+ * Per-train-teacher bucket table, collapsed by default.
  *
- * Mirrors `PerEvalTeacherTable`'s row shape so the eye doesn't have to
- * re-learn the layout. One row per Train teacher with that teacher's
- * three bucket counts — useful for spotting "Teacher A is dominating
- * the positive frames" or "Teacher B is contributing nothing but
- * uncertain ones (too noisy, raise its export_threshold?)".
+ * Useful when you have multiple train teachers and want to spot
+ * "Teacher A is dominating the positive frames" or "Teacher B
+ * contributes nothing but uncertain ones (too noisy, raise its
+ * export_threshold?)" — but not interesting enough to take top-level
+ * real estate every time.
  */
-function PerTrainTeacherBucketTable({
+function PerTrainTeacherBucketExpander({
   rows,
   teacherDetails,
   onInspect,
@@ -948,34 +1167,46 @@ function PerTrainTeacherBucketTable({
   teacherDetails: Record<string, RunDetail>;
   onInspect: (id: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="per-eval-table per-train-bucket-table">
-      <div className="per-eval-table-head per-train-bucket-head">
-        <span>Train Teacher</span>
-        <span>Positive</span>
-        <span>Uncertain</span>
-        <span>True neg.</span>
-      </div>
-      {rows.map((r) => {
-        const t = teacherDetails[r.teacher_id];
-        const label = t?.manifest.prompt ?? r.teacher_id.replace("teacher_", "");
-        return (
-          <div key={r.teacher_id} className="per-eval-row per-train-bucket-row">
-            <button
-              type="button"
-              className="teacher-chip"
-              title={`Inspect ${r.teacher_id}`}
-              onClick={() => onInspect(r.teacher_id)}
+    <details
+      className="per-train-bucket-expander"
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+    >
+      <summary>Per-Teacher breakdown ({rows.length})</summary>
+      <div className="per-eval-table per-train-bucket-table">
+        <div className="per-eval-table-head per-train-bucket-head">
+          <span>Train Teacher</span>
+          <span>Positive</span>
+          <span>Uncertain</span>
+          <span>True neg.</span>
+        </div>
+        {rows.map((r) => {
+          const t = teacherDetails[r.teacher_id];
+          const label =
+            t?.manifest.prompt ?? r.teacher_id.replace("teacher_", "");
+          return (
+            <div
+              key={r.teacher_id}
+              className="per-eval-row per-train-bucket-row"
             >
-              {label}
-            </button>
-            <span className="per-eval-num">{r.positive}</span>
-            <span className="per-eval-num">{r.uncertain}</span>
-            <span className="per-eval-num">{r.true_negative}</span>
-          </div>
-        );
-      })}
-    </div>
+              <button
+                type="button"
+                className="teacher-chip"
+                title={`Inspect ${r.teacher_id}`}
+                onClick={() => onInspect(r.teacher_id)}
+              >
+                {label}
+              </button>
+              <span className="per-eval-num">{r.positive}</span>
+              <span className="per-eval-num">{r.uncertain}</span>
+              <span className="per-eval-num">{r.true_negative}</span>
+            </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
@@ -1138,9 +1369,7 @@ function AdvancedThresholdPanel({
                 }}
               />
             </label>
-            <span className="advanced-row-help">
-              Detections at or above this confidence become labels.
-            </span>
+            <span className="advanced-row-help">{HELP.export_threshold.body}</span>
           </div>
           <div className="advanced-row">
             <label className="advanced-row-label">
@@ -1158,10 +1387,7 @@ function AdvancedThresholdPanel({
                 aria-invalid={tLow > exportThreshold}
               />
             </label>
-            <span className="advanced-row-help">
-              Frames with detections only between t_low and export_threshold are dropped
-              (teacher was unsure).
-            </span>
+            <span className="advanced-row-help">{HELP.t_low.body}</span>
           </div>
           <div className="advanced-row">
             <label className="advanced-row-label">
@@ -1174,10 +1400,7 @@ function AdvancedThresholdPanel({
                 treat_empty_as_negative
               </span>
             </label>
-            <span className="advanced-row-help">
-              Treat every zero-detection frame as a true negative. Reproduces
-              the old behaviour. Off by default.
-            </span>
+            <span className="advanced-row-help">{HELP.treat_empty_as_negative.body}</span>
           </div>
         </div>
       )}

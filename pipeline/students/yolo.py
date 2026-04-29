@@ -186,13 +186,20 @@ class YoloTrainer:
 
     def eval(
         self, *, weights: Path, data_yaml: Path
-    ) -> tuple[float, float]:
-        """Compute (map50, map50_95) — body ported from `eval_yolo`.
+    ) -> tuple[float, float, dict[str, dict[str, float]]]:
+        """Compute (map50, map50_95, per_class) — body ported from `eval_yolo`.
 
         Used per eval teacher to populate the per-eval-teacher
         transferability table. Ultralytics' `model.val()` returns a
         `DetMetrics` object with `.box.map50` (mAP@0.5) and `.box.map`
         (the unsuffixed `.map` IS map@0.5:0.95 in Ultralytics' API).
+
+        Per-class metrics come from `.box.maps` (per-class mAP@0.5:0.95
+        as a numpy array indexed by class id) and `.box.ap50` (per-class
+        mAP@0.5). We pair them with the model's `.names` map to produce
+        a {class_name: {map50, map50_95}} dict. If either array is
+        missing or shapes don't line up, we return an empty dict rather
+        than crashing — per-class is a value-add, not a hard requirement.
         """
         from ultralytics import YOLO
 
@@ -206,7 +213,41 @@ class YoloTrainer:
         )
         map50 = float(getattr(res.box, "map50", 0.0) or 0.0)
         map5095 = float(getattr(res.box, "map", 0.0) or 0.0)
-        return map50, map5095
+
+        per_class: dict[str, dict[str, float]] = {}
+        try:
+            ap50 = getattr(res.box, "ap50", None)  # per-class mAP@0.5
+            maps = getattr(res.box, "maps", None)  # per-class mAP@0.5:0.95
+            names = getattr(model, "names", {}) or {}
+            # Ultralytics' `ap_class_index` lists which class IDs were
+            # actually evaluated (only ones present in val); pair against
+            # that so we don't index ap50 with class IDs that have no row.
+            ap_idx = getattr(res.box, "ap_class_index", None)
+            if ap50 is not None and maps is not None and ap_idx is not None:
+                ap50_arr = ap50.tolist() if hasattr(ap50, "tolist") else list(ap50)
+                idx_arr = ap_idx.tolist() if hasattr(ap_idx, "tolist") else list(ap_idx)
+                # `maps` is indexed by absolute class id; `ap50` is indexed
+                # along ap_class_index — i.e. position-aligned with idx_arr.
+                for pos, cid in enumerate(idx_arr):
+                    cid = int(cid)
+                    cname = (
+                        names.get(cid, f"class_{cid}")
+                        if isinstance(names, dict)
+                        else (names[cid] if 0 <= cid < len(names) else f"class_{cid}")
+                    )
+                    cls_map50 = float(ap50_arr[pos]) if pos < len(ap50_arr) else 0.0
+                    cls_map5095 = (
+                        float(maps[cid]) if 0 <= cid < len(maps) else 0.0
+                    )
+                    per_class[str(cname)] = {
+                        "map50": cls_map50,
+                        "map50_95": cls_map5095,
+                    }
+        except Exception as e:  # pragma: no cover — never let per-class kill eval
+            log.warning("per-class mAP capture failed: %s", e)
+            per_class = {}
+
+        return map50, map5095, per_class
 
     def time_inference(
         self,

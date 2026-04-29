@@ -196,6 +196,12 @@ export interface RunProgress {
   frames_with_detections: number;
   started_at: string;
   updated_at: string;
+  // Optional epoch-pace fields (Optimize trainer only). Populated once
+  // the first epoch completes; null otherwise. Used to render a
+  // determinate progress bar with ETA.
+  current_epoch?: number | null;
+  total_epochs?: number | null;
+  epoch_seconds_avg?: number | null;
 }
 
 export interface RunDetail {
@@ -239,6 +245,11 @@ export interface StudentManifest {
   architecture?: string;
 }
 
+export interface PerClassMetric {
+  map50: number;
+  map50_95: number;
+}
+
 export interface PerEvalTeacherStat {
   teacher_id: string;
   n_images: number;
@@ -246,6 +257,9 @@ export interface PerEvalTeacherStat {
   map50: number;
   map50_95: number;
   error?: string;
+  /** Per-class mAP breakdown. Null/undefined on legacy runs that
+   *  evaluated before the per-class capture landed. */
+  per_class?: Record<string, PerClassMetric> | null;
 }
 
 export interface PerTrainTeacherBucket {

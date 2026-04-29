@@ -392,6 +392,22 @@ html, body, #root {
   animation: progress-slide 1.4s ease-in-out infinite;
 }
 
+/* Queued tier: same indeterminate animation but dimmed so the user can
+   tell at a glance that *this* row is just waiting, not actively
+   working. The colour matches the .status-queued pill. */
+.row-progress.queued .row-progress-fill {
+  background: #c4b5fd;
+}
+
+/* Determinate epoch progress for Optimize runs — wraps the 4px bar so the
+   label can render *below* the bar instead of being clipped by the bar's
+   overflow:hidden. */
+.row-epoch-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .row-progress-label {
   font-size: 10px;
   color: #6b7280;
@@ -1586,6 +1602,45 @@ html, body, #root {
 .per-eval-num.map-okay { background: #fef3c7; color: #92400e; }
 .per-eval-num.map-poor { background: #fee2e2; color: #991b1b; }
 
+/* Per-class expander */
+.per-eval-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.per-eval-chevron {
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 11px;
+  color: #6b7280;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 150ms ease;
+}
+.per-eval-chevron.open {
+  transform: rotate(90deg);
+  color: #2563eb;
+}
+.per-eval-chevron:hover { color: #111827; }
+
+.per-class-row {
+  background: #f9fafb;
+  font-size: 12px;
+}
+
+.per-eval-class-label {
+  padding-left: 28px;
+  color: #4b5563;
+  font-size: 12px;
+}
+
 .per-eval-error {
   grid-column: 1 / -1;
   font-size: 11px;
@@ -1599,11 +1654,439 @@ html, body, #root {
  * Images / mAP / mAP@0.5:0.95 mix. Slightly tighter top margin since this
  * table sits *under* the eval table in the same card. */
 .per-train-bucket-table {
-  margin-top: 12px;
+  margin-top: 0;
 }
 .per-train-bucket-head,
 .per-train-bucket-row {
   grid-template-columns: 1fr 90px 90px 90px;
+}
+
+/* ---- Optimize: Student detail card sections ---------------------------- */
+
+.student-identity {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.student-identity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.student-identity-arch {
+  font-weight: 600;
+  color: #111827;
+}
+
+.student-identity-size {
+  color: #4b5563;
+}
+
+.student-identity-id {
+  margin-left: auto;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.student-identity-meta {
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.student-error-card {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #991b1b;
+}
+
+.student-section {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.student-section-muted {
+  background: #f9fafb;
+  border-style: dashed;
+}
+
+.student-section-head h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.student-section-sub {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.45;
+}
+
+.student-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.student-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.student-stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.student-stat-value {
+  font-size: 13px;
+  color: #111827;
+}
+
+/* ---- Frame bucket tiles (Section 3) ------------------------------------ */
+
+.frame-bucket-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.frame-bucket-tile {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.frame-bucket-tile.bucket-positive {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+.frame-bucket-tile.bucket-uncertain {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+.frame-bucket-tile.bucket-negative {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.frame-bucket-count {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #111827;
+}
+
+.frame-bucket-label {
+  font-size: 12px;
+  color: #4b5563;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.frame-bucket-empty {
+  font-size: 12px;
+}
+
+.per-train-bucket-expander {
+  margin-top: 4px;
+}
+.per-train-bucket-expander summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #2563eb;
+  user-select: none;
+}
+.per-train-bucket-expander summary:hover {
+  text-decoration: underline;
+}
+
+/* ---- mAP cell with 0→1 scale bar --------------------------------------- */
+
+.map-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  text-align: right;
+  background: transparent !important;
+  padding: 2px 4px;
+}
+
+.map-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.map-bar {
+  display: block;
+  position: relative;
+  height: 4px;
+  background: #f3f4f6;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.map-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 250ms ease-out;
+}
+
+.map-cell.map-good .map-bar-fill { background: #16a34a; }
+.map-cell.map-okay .map-bar-fill { background: #d97706; }
+.map-cell.map-poor .map-bar-fill { background: #dc2626; }
+
+.map-cell.map-good .map-num { color: #166534; }
+.map-cell.map-okay .map-num { color: #92400e; }
+.map-cell.map-poor .map-num { color: #991b1b; }
+
+/* ---- InfoTip popover --------------------------------------------------- */
+
+.info-tip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.info-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid #d1d5db;
+  background: transparent;
+  color: #6b7280;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+}
+
+.info-tip-trigger:hover {
+  background: #f3f4f6;
+  color: #111827;
+  border-color: #9ca3af;
+}
+
+.info-tip-trigger[aria-expanded="true"] {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+
+.info-tip-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 30;
+  width: 260px;
+  padding: 10px 12px;
+  background: #1f2937;
+  color: #f9fafb;
+  border-radius: 6px;
+  box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3);
+  font-size: 12px;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  text-align: left;
+}
+
+.info-tip-right { right: 0; }
+.info-tip-left { left: 0; }
+
+.info-tip-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #fff;
+}
+
+.info-tip-body {
+  color: #d1d5db;
+}
+
+/* ---- Training curves --------------------------------------------------- */
+
+.training-curves {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin-top: 4px;
+}
+
+.training-curve {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #fafafa;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.training-curve-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.curves-empty {
+  font-size: 12px;
+  padding: 12px 0 0;
+}
+
+/* ---- Sample predictions grid ------------------------------------------ */
+
+.sample-grid-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.sample-grid-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 11px;
+  color: #4b5563;
+}
+
+.sample-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 4px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+.sample-legend-gt { background: #228b22; }
+.sample-legend-pred { background: #dc3c3c; }
+
+.sample-grid-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sample-grid-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.sample-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.sample-thumb {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  display: block;
+}
+
+.sample-thumb:hover {
+  border-color: #2563eb;
+}
+
+.sample-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.sample-lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.sample-lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 25px 50px -12px rgba(0,0,0,0.6);
+}
+
+.sample-lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 24px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.15);
+  color: #fff;
+  font-size: 22px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.sample-lightbox-close:hover {
+  background: rgba(255,255,255,0.3);
 }
 
 /* ---- VideoTreePicker — folder-tree picker for data/ -------------------- */

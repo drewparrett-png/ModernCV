@@ -229,6 +229,9 @@ class RunProgressModel(BaseModel):
     frames_with_detections: int = 0
     started_at: str = ""
     updated_at: str = ""
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    epoch_seconds_avg: Optional[float] = None
 
 
 class RunDetail(BaseModel):
@@ -419,6 +422,13 @@ class StudentManifestModel(BaseModel):
     architecture: str = "yolov8n"
 
 
+class PerClassMetric(BaseModel):
+    """mAP for a single class within one eval teacher's evaluation."""
+
+    map50: float = 0.0
+    map50_95: float = 0.0
+
+
 class PerEvalTeacherStat(BaseModel):
     """One row of the Student's per-eval-teacher transferability table."""
 
@@ -429,6 +439,11 @@ class PerEvalTeacherStat(BaseModel):
     map50_95: float = 0.0
     # Set when the trainer skipped this teacher (missing source video, etc.).
     error: Optional[str] = None
+    # Per-class mAP breakdown. Populated by the Ultralytics evaluator when
+    # the eval dataset has named classes; absent on legacy stats.json files
+    # written before the per-class capture landed. Keys are class names
+    # (e.g. "soccer ball"). Empty/None = "no breakdown available".
+    per_class: Optional[dict[str, PerClassMetric]] = None
 
 
 class PerTrainTeacherBucket(BaseModel):

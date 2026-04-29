@@ -303,6 +303,14 @@ class RunProgress:
     frames_with_detections: int = 0
     started_at: str = ""
     updated_at: str = ""
+    # Optional epoch-pace fields. Populated by the Optimize trainer's
+    # on_train_epoch_end callback — None for Teacher runs and during
+    # the prep / eval / timing phases of a training run. Lets the GUI
+    # render a determinate progress bar with ETA instead of an
+    # indeterminate spinner once the first epoch lands.
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    epoch_seconds_avg: Optional[float] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)

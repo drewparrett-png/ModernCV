@@ -85,12 +85,16 @@ class StudentTrainer(Protocol):
         """
         ...
 
-    def eval(self, *, weights: Path, data_yaml: Path) -> tuple[float, float]:
-        """Compute (map50, map50_95) for `weights` on `data_yaml`.
+    def eval(
+        self, *, weights: Path, data_yaml: Path
+    ) -> tuple[float, float, dict[str, dict[str, float]]]:
+        """Compute (map50, map50_95, per_class) for `weights` on `data_yaml`.
 
-        Used for per-eval-teacher transferability scoring. Returns
-        `(0.0, 0.0)` when the framework can't produce a number rather
-        than raising — one bad eval teacher shouldn't tank the whole run.
+        Used for per-eval-teacher transferability scoring. The third
+        element is a {class_name: {map50, map50_95}} dict — empty dict
+        when the framework can't produce per-class numbers. Returns
+        `(0.0, 0.0, {})` when the whole eval can't run rather than
+        raising — one bad eval teacher shouldn't tank the whole run.
         """
         ...
 
