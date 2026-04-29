@@ -43,6 +43,20 @@ export async function fetchVideos(): Promise<VideosResponse> {
   return res.json();
 }
 
+export interface VideoInfo {
+  frame_count: number;
+  fps: number;
+  duration_seconds: number;
+}
+
+export async function fetchVideoInfo(path: string): Promise<VideoInfo> {
+  const res = await fetch(
+    `${API_BASE}/videos/info?path=${encodeURIComponent(path)}`,
+  );
+  if (!res.ok) throw new Error(`GET /videos/info: ${res.status}`);
+  return res.json();
+}
+
 export async function runGraph(graph: GraphSpec): Promise<RunResponse> {
   const res = await fetch(`${API_BASE}/run`, {
     method: "POST",

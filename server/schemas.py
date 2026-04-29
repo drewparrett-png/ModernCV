@@ -139,6 +139,7 @@ class LearnRequest(BaseModel):
     reid_impl: Optional[str] = None
     track_impl: Optional[str] = None
     max_frames: Optional[int] = None  # cap for fast iteration
+    frame_stride: int = 1  # yield every Nth source frame; 1 = every frame
     # Phase 2: detector confidence is no longer a run-time knob. The
     # detector runs at a fixed low floor and the GUI filters post-hoc via
     # the manifest's `display_threshold`.

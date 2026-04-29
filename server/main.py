@@ -170,6 +170,20 @@ def videos() -> dict:
     return {"videos": found, "data_dir": str(DATA_DIR.resolve()), "count": len(found)}
 
 
+@app.get("/videos/info")
+def video_info(path: str) -> dict:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise HTTPException(status_code=404, detail=f"cannot open: {path}")
+    try:
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    finally:
+        cap.release()
+    duration = frame_count / fps if fps > 0 and frame_count > 0 else 0.0
+    return {"frame_count": frame_count, "fps": fps, "duration_seconds": duration}
+
+
 @app.get("/models/cache_status", response_model=CacheStatusResponse)
 def cache_status_endpoint(impls: str = "") -> CacheStatusResponse:
     impl_list = [s.strip() for s in impls.split(",") if s.strip()]
@@ -325,6 +339,7 @@ def learn_endpoint(project_id: str, req: LearnRequest) -> RunDetail:
             reid_impl=req.reid_impl,
             track_impl=req.track_impl,
             max_frames=req.max_frames,
+            frame_stride=req.frame_stride,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

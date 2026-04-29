@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import queue
 import threading
 import time
@@ -71,6 +72,7 @@ class _LearnJob:
     reid_impl: Optional[str]
     track_impl: Optional[str]
     max_frames: Optional[int]
+    frame_stride: int
 
 
 _LEARN_QUEUE: "queue.Queue[Optional[_LearnJob]]" = queue.Queue()
@@ -196,6 +198,7 @@ def _execute_queued_job(job: _LearnJob) -> None:
             reid_impl=job.reid_impl,
             track_impl=job.track_impl,
             max_frames=job.max_frames,
+            frame_stride=job.frame_stride,
         )
     finally:
         # Phase 6 fix #2: drop allocator-cached buffers between runs.
@@ -347,18 +350,20 @@ def _write_teacher_coco(rdir: Path, *, prompt: str, video_path: str) -> None:
     )
 
 
-def _count_frames(video_path: str, max_frames: Optional[int]) -> int:
+def _count_frames(video_path: str, max_frames: Optional[int], frame_stride: int = 1) -> int:
     """Best-effort frame count for the progress bar.
 
     cv2's CAP_PROP_FRAME_COUNT can be off (some codecs report 0) — we treat
     0 as "unknown" so the UI shows an indeterminate spinner instead of a
-    bogus percentage. Capped by max_frames when set.
+    bogus percentage. Adjusted for stride and capped by max_frames when set.
     """
     cap = cv2.VideoCapture(video_path)
     try:
         n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     finally:
         cap.release()
+    if n > 0 and frame_stride > 1:
+        n = math.ceil(n / frame_stride)
     if max_frames is not None:
         n = min(n, max_frames) if n > 0 else max_frames
     return max(0, n)
@@ -405,6 +410,7 @@ def build_graph(
     reid_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     max_frames: Optional[int] = None,
+    frame_stride: int = 1,
 ) -> tuple[GraphSpec, dict[str, str]]:
     """Translate a LearnRequest's intent into a linear GraphSpec.
 
@@ -423,6 +429,8 @@ def build_graph(
     input_params: dict = {"path": video_path}
     if max_frames is not None:
         input_params["max_frames"] = max_frames
+    if frame_stride > 1:
+        input_params["frame_stride"] = frame_stride
     nodes.append(NodeSpec(id="n_input", kind=BlockKind.INPUT, impl="opencv", params=input_params))
     models["input"] = "opencv"
 
@@ -521,6 +529,7 @@ def run_learn(
     reid_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     max_frames: Optional[int] = None,
+    frame_stride: int = 1,
     runs_root: Path = runs_mod.RUNS_DIR,
 ) -> runs_mod.RunManifest:
     """Synchronous Learn run. Used by CLI/tests.
@@ -539,7 +548,7 @@ def run_learn(
         runs_root=runs_root,
     )
     started_at = _now_iso()
-    total_frames = _count_frames(video_path, max_frames)
+    total_frames = _count_frames(video_path, max_frames, frame_stride)
     return _run_with_dir(
         rdir=rdir,
         manifest=manifest,
@@ -554,6 +563,7 @@ def run_learn(
         reid_impl=reid_impl,
         track_impl=track_impl,
         max_frames=max_frames,
+        frame_stride=frame_stride,
     )
 
 
@@ -569,6 +579,7 @@ def run_learn_in_background(
     reid_impl: Optional[str] = None,
     track_impl: Optional[str] = None,
     max_frames: Optional[int] = None,
+    frame_stride: int = 1,
     runs_root: Path = runs_mod.RUNS_DIR,
 ) -> runs_mod.RunManifest:
     """Allocate the run dir + manifest, then process in a daemon thread.
@@ -607,7 +618,7 @@ def run_learn_in_background(
     # quirks on some platforms and can stall a worker for many seconds).
     started_at = _now_iso()
     try:
-        total_frames = _count_frames(video_path, max_frames)
+        total_frames = _count_frames(video_path, max_frames, frame_stride)
     except Exception as e:
         log.warning("frame count probe failed for %s: %s", video_path, e)
         total_frames = max_frames or 0
@@ -650,6 +661,7 @@ def run_learn_in_background(
         reid_impl=reid_impl,
         track_impl=track_impl,
         max_frames=max_frames,
+        frame_stride=max(1, frame_stride),
     )
     ensure_learn_worker_started()
     _LEARN_QUEUE.put(job)
@@ -676,6 +688,7 @@ def _run_with_dir(
     reid_impl: Optional[str],
     track_impl: Optional[str],
     max_frames: Optional[int],
+    frame_stride: int = 1,
 ) -> runs_mod.RunManifest:
     """Shared body for sync + background entry points.
 
@@ -731,6 +744,7 @@ def _run_with_dir(
             reid_impl=reid_impl,
             track_impl=track_impl,
             max_frames=max_frames,
+            frame_stride=frame_stride,
         )
     except ValueError as e:
         runs_mod.mark_failed(rdir, str(e))

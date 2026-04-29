@@ -10,17 +10,38 @@
  * is now just "start another Teacher".
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
 import type { RunDetail, RunProgress } from "../types";
-import { runOverlayUrl } from "../api";
+import { fetchVideoInfo, runOverlayUrl, type VideoInfo } from "../api";
 import { VideoTreePicker } from "../components/VideoTreePicker";
+
+const STRIDE_PRESETS = [1, 2, 5, 10, 20, 30];
+
+function formatDuration(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
 
 export function Learn() {
   const form = useStore((s) => s.learnForm);
   const setField = useStore((s) => s.setLearnField);
   const videos = useStore((s) => s.videos);
   const error = useStore((s) => s.learnError);
+  const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
+
+  useEffect(() => {
+    if (!form.videoPath) {
+      setVideoInfo(null);
+      return;
+    }
+    let cancelled = false;
+    fetchVideoInfo(form.videoPath)
+      .then((info) => { if (!cancelled) setVideoInfo(info); })
+      .catch(() => { if (!cancelled) setVideoInfo(null); });
+    return () => { cancelled = true; };
+  }, [form.videoPath]);
   const teacherDetails = useStore((s) => s.teacherDetails);
   const selectedId = useStore((s) => s.selectedTeacherId);
   const select = useStore((s) => s.selectTeacher);
@@ -115,6 +136,32 @@ export function Learn() {
               selected={form.videoPath}
               onSelect={(path) => setField("videoPath", path)}
             />
+            {videoInfo && (
+              <div className="video-info-line">
+                {videoInfo.frame_count > 0
+                  ? videoInfo.frame_count.toLocaleString() + " frames"
+                  : "frame count unknown"}
+                {videoInfo.fps > 0 && ` · ${videoInfo.fps.toFixed(0)} fps`}
+                {videoInfo.duration_seconds > 0 &&
+                  ` · ${formatDuration(videoInfo.duration_seconds)}`}
+              </div>
+            )}
+          </label>
+
+          <label className="field">
+            <span className="field-label">Sample every Nth frame</span>
+            <div className="stride-chips">
+              {STRIDE_PRESETS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={`stride-chip${form.frameStride === n ? " active" : ""}`}
+                  onClick={() => setField("frameStride", n)}
+                >
+                  {n === 1 ? "every frame" : `every ${n}th`}
+                </button>
+              ))}
+            </div>
           </label>
 
           <label className="field field-inline">

@@ -49,27 +49,32 @@ class OpenCVVideoReader(SourceAdapter):
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         self.max_frames: Optional[int] = self.params.get("max_frames")
+        self.frame_stride: int = max(1, int(self.params.get("frame_stride", 1)))
         log.info(
-            "OpenCVVideoReader: %s — %.2f fps, %d frames",
+            "OpenCVVideoReader: %s — %.2f fps, %d frames, stride=%d",
             path,
             self.fps,
             self.frame_count,
+            self.frame_stride,
         )
 
     def frames(self) -> Iterator[FrameBatch]:
-        idx = 0
+        src_idx = 0   # position in the source video (used as frame_index for seeking)
+        yielded = 0   # number of frames yielded (checked against max_frames)
         while True:
-            if self.max_frames is not None and idx >= self.max_frames:
+            if self.max_frames is not None and yielded >= self.max_frames:
                 break
             ok, frame = self.cap.read()
             if not ok:
                 break
-            yield FrameBatch(
-                frame_index=idx,
-                image=frame,  # BGR HxWx3 uint8
-                metadata={"fps": self.fps, "source_path": self.path},
-            )
-            idx += 1
+            if src_idx % self.frame_stride == 0:
+                yield FrameBatch(
+                    frame_index=src_idx,
+                    image=frame,  # BGR HxWx3 uint8
+                    metadata={"fps": self.fps, "source_path": self.path},
+                )
+                yielded += 1
+            src_idx += 1
 
     def teardown(self) -> None:
         if hasattr(self, "cap"):

@@ -105,6 +105,7 @@ export interface LearnRequest {
   reid_impl?: string;
   track_impl?: string;
   max_frames?: number;
+  frame_stride?: number;
 }
 
 /** Phase 3: a run is "approved" only when every processed frame carries an
