@@ -271,10 +271,13 @@ def _manifest_to_model(
     project_id: str, manifest: runs_mod.RunManifest, rdir: Path
 ) -> RunManifestModel:
     """Wrap a RunManifest as the API model with `project_id` and the
-    review_status derived from disk."""
+    review_status + frame counts derived from disk."""
+    status, n_reviewed, n_total = runs_mod.derive_review_progress(rdir)
     return RunManifestModel(
         project_id=project_id,
-        review_status=runs_mod.derive_review_status(rdir),  # type: ignore[arg-type]
+        review_status=status,  # type: ignore[arg-type]
+        n_frames_reviewed=n_reviewed,
+        n_frames_total=n_total,
         **manifest.__dict__,
     )
 

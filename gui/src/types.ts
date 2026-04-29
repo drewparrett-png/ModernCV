@@ -154,6 +154,8 @@ export interface RunManifest {
   error: string | null;
   approved_at: string | null;
   review_status: ReviewStatus;
+  n_frames_reviewed: number;
+  n_frames_total: number;
   /** Phase 2: post-hoc score filter the inspector applies by default.
    *  PATCH `/projects/{pid}/runs/{rid}` to persist a new value. */
   display_threshold: number;

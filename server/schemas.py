@@ -171,6 +171,8 @@ class RunManifestModel(BaseModel):
     # `progress.json`; `approved_at` is the timestamp stamped when coverage
     # flips to 100%.
     review_status: Literal["unreviewed", "in_progress", "approved"] = "unreviewed"
+    n_frames_reviewed: int = 0
+    n_frames_total: int = 0
     # Phase 2: post-hoc score filter the GUI applies by default. The
     # detector persists every detection at SCORE_FLOOR=0.05; the inspector
     # slider PATCHes this field to change the canonical view without
