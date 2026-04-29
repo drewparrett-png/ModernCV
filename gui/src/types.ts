@@ -299,6 +299,48 @@ export interface StudentsResponse {
   students: StudentManifest[];
 }
 
+// ---- Student-run (Phase 5) ----------------------------------------------
+
+export type StudentRunInputKind = "video" | "teacher_dataset";
+
+export interface StudentRunRequest {
+  input_kind: StudentRunInputKind;
+  input_ref: string;
+}
+
+export interface StudentRunManifest {
+  id: string;
+  student_id: string;
+  project_id: string;
+  input_kind: string;
+  input_ref: string;
+  started_at: string;
+  ended_at: string | null;
+  status: string;
+  error: string | null;
+}
+
+export interface StudentRunStats {
+  n_frames: number;
+  n_detections: number;
+  avg_inference_ms: number;
+  p50_inference_ms: number;
+  p95_inference_ms: number;
+  /** Populated only when input_kind === "teacher_dataset". */
+  map50: number | null;
+  map50_95: number | null;
+}
+
+export interface StudentRunDetail {
+  manifest: StudentRunManifest;
+  stats: StudentRunStats | null;
+  progress: RunProgress | null;
+}
+
+export interface StudentRunsResponse {
+  runs: StudentRunManifest[];
+}
+
 export interface OptimizeRequest {
   train_teacher_ids: string[];
   eval_teacher_ids: string[];

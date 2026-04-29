@@ -34,6 +34,14 @@ Endpoints:
     GET  /projects/{pid}/students/architectures   — registered trainer names
     POST /projects/{pid}/students/preview-buckets — live bucket preview
     DELETE /projects/{pid}/students/{sid}
+
+    POST /projects/{pid}/students/{sid}/run         — kick a Student-run
+    GET  /projects/{pid}/students/{sid}/runs        — list runs
+    GET  /projects/{pid}/students/{sid}/runs/{rid}  — manifest+stats+progress
+    GET  /projects/{pid}/students/{sid}/runs/{rid}/overlay.mp4
+    GET  /projects/{pid}/students/{sid}/runs/{rid}/frame/{idx}
+    GET  /projects/{pid}/students/{sid}/runs/{rid}/labels
+    DELETE /projects/{pid}/students/{sid}/runs/{rid}
 """
 
 from __future__ import annotations
@@ -60,6 +68,11 @@ from pipeline.learn import (
 from pipeline.models.registry import REGISTRY
 from pipeline.optimize import run_optimize_in_background
 from pipeline.runner import run as run_graph
+from pipeline.student_run import (
+    ensure_student_run_worker_started,
+    run_student_run_in_background,
+    stop_student_run_worker,
+)
 from pipeline.students import list_trainers
 from server.schemas import (
     ArchitecturesResponse,
@@ -92,6 +105,11 @@ from server.schemas import (
     RunStatsModel,
     StudentDetail,
     StudentManifestModel,
+    StudentRunDetail,
+    StudentRunModel,
+    StudentRunRequest,
+    StudentRunStatsModel,
+    StudentRunsResponse,
     StudentStatsModel,
     StudentsResponse,
 )
@@ -108,9 +126,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if n:
         log.info("startup: marked %d stale runs as failed", n)
     ensure_learn_worker_started()
+    ensure_student_run_worker_started()
     try:
         yield
     finally:
+        stop_student_run_worker()
         stop_learn_worker()
 
 
@@ -837,3 +857,195 @@ def delete_student(project_id: str, student_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"no such student: {student_id}")
     runs_mod.delete_run(rdir)
     return {"deleted": student_id}
+
+
+# ---- Per-student: run inference (Phase 5) ---------------------------------
+
+
+def _require_student(project_id: str, student_id: str) -> Path:
+    """Validate the student exists and return its dir.
+
+    Used by every student-run endpoint to keep the 404 path uniform.
+    """
+    sdir = runs_mod.student_dir(project_id, student_id)
+    if not (sdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(
+            status_code=404, detail=f"no such student: {student_id}"
+        )
+    return sdir
+
+
+def _student_run_to_model(m: runs_mod.StudentRunManifest) -> StudentRunModel:
+    return StudentRunModel(**m.__dict__)
+
+
+def _student_run_detail(
+    project_id: str, student_id: str, run_id: str
+) -> StudentRunDetail:
+    rdir = runs_mod.student_run_dir(project_id, student_id, run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(
+            status_code=404, detail=f"no such student-run: {run_id}"
+        )
+    manifest = runs_mod.read_student_run_manifest(rdir)
+    stats = runs_mod.read_student_run_stats(rdir)
+    progress = runs_mod.read_progress(rdir)
+    return StudentRunDetail(
+        manifest=_student_run_to_model(manifest),
+        stats=StudentRunStatsModel(**stats.__dict__) if stats else None,
+        progress=RunProgressModel(**progress.__dict__) if progress else None,
+    )
+
+
+@app.post(
+    "/projects/{project_id}/students/{student_id}/run",
+    response_model=StudentRunDetail,
+)
+def start_student_run(
+    project_id: str, student_id: str, req: StudentRunRequest
+) -> StudentRunDetail:
+    """Kick off a Student running inference against an arbitrary input.
+
+    Validates the input synchronously (so the user sees a 400 immediately
+    rather than a queued-then-failed state for typos) before enqueueing.
+    """
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    try:
+        manifest = run_student_run_in_background(
+            project_id=project_id,
+            student_id=student_id,
+            input_kind=req.input_kind,
+            input_ref=req.input_ref,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _student_run_detail(project_id, student_id, manifest.id)
+
+
+@app.get(
+    "/projects/{project_id}/students/{student_id}/runs",
+    response_model=StudentRunsResponse,
+)
+def list_student_runs_endpoint(
+    project_id: str, student_id: str
+) -> StudentRunsResponse:
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    runs = runs_mod.list_student_runs(project_id, student_id)
+    return StudentRunsResponse(runs=[_student_run_to_model(m) for m in runs])
+
+
+@app.get(
+    "/projects/{project_id}/students/{student_id}/runs/{run_id}",
+    response_model=StudentRunDetail,
+)
+def get_student_run_endpoint(
+    project_id: str, student_id: str, run_id: str
+) -> StudentRunDetail:
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    return _student_run_detail(project_id, student_id, run_id)
+
+
+@app.get(
+    "/projects/{project_id}/students/{student_id}/runs/{run_id}/overlay.mp4"
+)
+def student_run_overlay(
+    project_id: str, student_id: str, run_id: str
+) -> FileResponse:
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    rdir = runs_mod.student_run_dir(project_id, student_id, run_id)
+    p = rdir / runs_mod.OVERLAY_NAME
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="overlay not yet written")
+    return FileResponse(p, media_type="video/mp4")
+
+
+@app.get(
+    "/projects/{project_id}/students/{student_id}/runs/{run_id}/labels"
+)
+def student_run_labels(
+    project_id: str, student_id: str, run_id: str
+) -> Response:
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    rdir = runs_mod.student_run_dir(project_id, student_id, run_id)
+    p = rdir / runs_mod.PREDICTIONS_DIR / runs_mod.PER_FRAME_NAME
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="no per-frame predictions yet")
+    return Response(content=p.read_bytes(), media_type="application/x-ndjson")
+
+
+@app.get(
+    "/projects/{project_id}/students/{student_id}/runs/{run_id}/frame/{idx}"
+)
+def student_run_frame(
+    project_id: str,
+    student_id: str,
+    run_id: str,
+    idx: int,
+    source: str = Query("overlay", pattern="^(raw|overlay)$"),
+) -> Response:
+    """Single frame from a student-run, raw or overlay.
+
+    `raw` reads the source video the student-run was driven against
+    (the `input_ref` for kind=video, or the teacher's video_path for
+    kind=teacher_dataset). `overlay` reads the rendered overlay.mp4.
+    """
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    rdir = runs_mod.student_run_dir(project_id, student_id, run_id)
+    if not (rdir / runs_mod.MANIFEST_NAME).exists():
+        raise HTTPException(status_code=404, detail=f"no such student-run: {run_id}")
+
+    if source == "overlay":
+        video_path = str(rdir / runs_mod.OVERLAY_NAME)
+    else:
+        manifest = runs_mod.read_student_run_manifest(rdir)
+        if manifest.input_kind == "video":
+            video_path = manifest.input_ref
+        else:
+            teacher_dir = runs_mod.run_dir(project_id, manifest.input_ref)
+            try:
+                tm = runs_mod.read_manifest(teacher_dir)
+                video_path = tm.video_path
+            except Exception:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"teacher source video missing: {manifest.input_ref}",
+                )
+
+    if not Path(video_path).exists():
+        raise HTTPException(status_code=404, detail=f"video not found: {video_path}")
+
+    cap = cv2.VideoCapture(video_path)
+    try:
+        if not cap.isOpened():
+            raise HTTPException(status_code=500, detail=f"cannot open {video_path}")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, idx))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise HTTPException(status_code=404, detail=f"frame {idx} unavailable")
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise HTTPException(status_code=500, detail="jpeg encode failed")
+        return Response(content=bytes(buf), media_type="image/jpeg")
+    finally:
+        cap.release()
+
+
+@app.delete(
+    "/projects/{project_id}/students/{student_id}/runs/{run_id}"
+)
+def delete_student_run_endpoint(
+    project_id: str, student_id: str, run_id: str
+) -> dict:
+    _require_project(project_id)
+    _require_student(project_id, student_id)
+    rdir = runs_mod.student_run_dir(project_id, student_id, run_id)
+    if not rdir.exists():
+        raise HTTPException(status_code=404, detail=f"no such student-run: {run_id}")
+    runs_mod.delete_student_run(rdir)
+    return {"deleted": run_id}

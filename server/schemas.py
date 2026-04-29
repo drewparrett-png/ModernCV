@@ -518,6 +518,68 @@ class ArchitecturesResponse(BaseModel):
     architectures: list[str] = Field(default_factory=list)
 
 
+# ---- Student-run (Phase 5) -------------------------------------------------
+
+
+class StudentRunRequest(BaseModel):
+    """Body of `POST /projects/{pid}/students/{sid}/run`.
+
+    `input_kind`:
+      - `video` — `input_ref` is a path under `data/`. The Student runs
+        inference on the file and persists predictions + an overlay.
+      - `teacher_dataset` — `input_ref` is a Teacher run id within the
+        same project. The Teacher's source video becomes the input and
+        its COCO labels become ground truth for mAP scoring.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_kind: Literal["video", "teacher_dataset"]
+    input_ref: str = Field(min_length=1)
+
+
+class StudentRunModel(BaseModel):
+    """Manifest projection of a single student-run."""
+
+    id: str
+    student_id: str
+    project_id: str
+    input_kind: str
+    input_ref: str
+    started_at: str
+    ended_at: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+
+
+class StudentRunStatsModel(BaseModel):
+    """Inference summary for a completed student-run.
+
+    `map50` / `map50_95` are populated only for `teacher_dataset` runs;
+    video-input runs have no ground truth and these fields stay `None`.
+    """
+
+    n_frames: int = 0
+    n_detections: int = 0
+    avg_inference_ms: float = 0.0
+    p50_inference_ms: float = 0.0
+    p95_inference_ms: float = 0.0
+    map50: Optional[float] = None
+    map50_95: Optional[float] = None
+
+
+class StudentRunDetail(BaseModel):
+    """`GET /projects/{pid}/students/{sid}/runs/{rid}` response shape."""
+
+    manifest: StudentRunModel
+    stats: Optional[StudentRunStatsModel] = None
+    progress: Optional[RunProgressModel] = None
+
+
+class StudentRunsResponse(BaseModel):
+    runs: list[StudentRunModel] = Field(default_factory=list)
+
+
 # ---- Preview-buckets endpoint ---------------------------------------------
 
 

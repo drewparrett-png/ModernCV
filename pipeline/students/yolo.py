@@ -27,7 +27,7 @@ import shutil
 import time
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from pipeline.students.base import (
     INFERENCE_TIMING_SAMPLES,
@@ -249,6 +249,63 @@ class YoloTrainer:
         p50 = timings[len(timings) // 2]
         p95 = timings[min(len(timings) - 1, int(len(timings) * 0.95))]
         return avg, p50, p95
+
+    def predict(
+        self,
+        *,
+        weights: Path,
+        frames: Iterable[Any],
+    ) -> Iterator[list[dict]]:
+        """Phase 5: stream detections over a frame iterator.
+
+        Loads the Ultralytics model once and calls `model.predict()` per
+        frame. We pass numpy arrays directly (BGR uint8) — Ultralytics
+        accepts them and produces `Results` with `.boxes.xyxy` /
+        `.boxes.conf` / `.boxes.cls` and a `.names` map for class names.
+
+        Each yielded list mirrors `runs.detection_to_dict`'s output so the
+        caller can write straight to `predictions/per_frame.jsonl` without
+        another conversion pass.
+        """
+        from ultralytics import YOLO
+
+        model = YOLO(str(weights))
+        device = _pick_device()
+        names = getattr(model, "names", None) or {}
+
+        for frame in frames:
+            results = model.predict(frame, device=device, verbose=False)
+            dets: list[dict] = []
+            if not results:
+                yield dets
+                continue
+            r = results[0]
+            boxes = getattr(r, "boxes", None)
+            if boxes is None or len(boxes) == 0:
+                yield dets
+                continue
+            # `.xyxy` / `.conf` / `.cls` are torch tensors; pull to numpy
+            # for cheap iteration without forcing the whole batch through
+            # tensor ops.
+            xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else boxes.xyxy
+            conf = boxes.conf.cpu().numpy() if hasattr(boxes.conf, "cpu") else boxes.conf
+            cls = boxes.cls.cpu().numpy() if hasattr(boxes.cls, "cpu") else boxes.cls
+            for i in range(len(xyxy)):
+                cid = int(cls[i])
+                cname = (
+                    names.get(cid, f"class_{cid}") if isinstance(names, dict) else
+                    (names[cid] if 0 <= cid < len(names) else f"class_{cid}")
+                )
+                x1, y1, x2, y2 = (float(v) for v in xyxy[i])
+                dets.append(
+                    {
+                        "bbox_xyxy": [x1, y1, x2, y2],
+                        "score": float(conf[i]),
+                        "class_id": cid,
+                        "class_name": str(cname),
+                    }
+                )
+            yield dets
 
 
 # ---- Registered size variants ---------------------------------------------

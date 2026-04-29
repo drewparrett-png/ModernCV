@@ -35,6 +35,7 @@ import type {
   Task,
 } from "../types";
 import { Compare } from "./Compare";
+import { StudentRunPanel } from "./StudentRunPanel";
 
 // Confidence-band defaults — keep in lockstep with `OptimizeRequest`'s
 // backend defaults (`server/schemas.py`) so the form's initial submission
@@ -640,9 +641,42 @@ function SelectedStudent({
   const { manifest, stats, progress } = detail;
   const trainTeachers = manifest.train_teacher_ids;
   const evalTeachers = manifest.eval_teacher_ids;
+  // Phase 5: sub-tabs inside the Selected Student panel. Default to
+  // Overview (the existing content); Run hosts the new student-run UI.
+  const [studentTab, setStudentTab] = useState<"overview" | "run">("overview");
+  // Pull all teacher details for the Run panel's input picker — Phase 5
+  // expects them as a list, while the parent already passes a record.
+  const teachers = useMemo(() => Object.values(teacherDetails), [teacherDetails]);
   return (
     <section className="learn-result">
       <h3>{manifest.prompt}</h3>
+      <nav className="student-tabs">
+        <button
+          type="button"
+          className={`student-tab ${studentTab === "overview" ? "active" : ""}`}
+          onClick={() => setStudentTab("overview")}
+        >
+          Overview
+        </button>
+        <button
+          type="button"
+          className={`student-tab ${studentTab === "run" ? "active" : ""}`}
+          onClick={() => setStudentTab("run")}
+          disabled={manifest.status !== "completed"}
+          title={
+            manifest.status === "completed"
+              ? "Run this Student against a video or Teacher dataset"
+              : "Wait for training to finish before running"
+          }
+        >
+          Run
+        </button>
+      </nav>
+      {studentTab === "run" && (
+        <StudentRunPanel student={detail} teachers={teachers} />
+      )}
+      {studentTab === "overview" && (
+      <>
       <div className="result-card">
         <div className="result-row">
           <span className="result-key">Run ID</span>
@@ -774,6 +808,8 @@ function SelectedStudent({
             <div className="progress-bar-fill" />
           </div>
         </div>
+      )}
+      </>
       )}
     </section>
   );

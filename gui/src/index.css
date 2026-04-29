@@ -2684,3 +2684,180 @@ html, body, #root {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ---- Student-run panel (Phase 5) -------------------------------------- */
+
+.student-tabs {
+  display: flex;
+  gap: 0;
+  margin: 8px 0 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.student-tab {
+  padding: 6px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  color: #6b7280;
+}
+
+.student-tab.active {
+  color: #111827;
+  border-bottom-color: #2563eb;
+  font-weight: 600;
+}
+
+.student-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.student-run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 0;
+}
+
+.student-run-header h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.student-run-header p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.student-run-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+}
+
+.student-run-kind-row {
+  display: flex;
+  gap: 16px;
+}
+
+.student-run-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.student-run-picker {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.student-run-submit {
+  align-self: flex-start;
+  padding: 6px 14px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.student-run-submit:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.student-run-error {
+  padding: 8px 12px;
+  background: #fef2f2;
+  color: #991b1b;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.student-run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.student-run-row {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.student-run-row.expanded {
+  background: #f9fafb;
+}
+
+.student-run-row-summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.student-run-row-summary:hover {
+  background: #f3f4f6;
+}
+
+.student-run-input {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-run-time {
+  font-size: 11px;
+}
+
+.student-run-body {
+  padding: 12px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.student-run-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.student-run-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px 12px;
+  font-size: 12px;
+}
+
+.student-run-progress {
+  font-size: 11px;
+}
+
+.student-run-video {
+  width: 100%;
+  border-radius: 4px;
+  background: black;
+  max-height: 360px;
+}
