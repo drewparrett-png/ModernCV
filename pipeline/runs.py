@@ -55,6 +55,7 @@ OVERLAY_NAME = "overlay.mp4"
 LABELS_DIR = "labels"
 COCO_NAME = "coco.json"
 PER_FRAME_NAME = "per_frame.jsonl"
+CROPS_DIR = "crops"
 
 
 # ---- Project --------------------------------------------------------------
@@ -1343,6 +1344,124 @@ def unset_frame_state(rdir: Path, frame_idx: int) -> None:
     states.pop(int(frame_idx), None)
     write_frame_states(rdir, states)
     _stamp_approved_at_if_complete(rdir, states)
+
+
+# ---- Detections ordering + crops (Phase 4) -------------------------------
+
+
+@dataclass
+class DetectionRow:
+    """One detection in a run, flattened across frames for crop-flip review.
+
+    `accepted` is derived from `frame_states.json`: a detection is rejected
+    iff its frame's state is `curated` and its index is in `rejected_dets`.
+    Frames with state `confirmed_empty` or `marked_missed` keep the
+    detection as `accepted=true` here — those whole-frame verdicts are
+    expressed elsewhere (the inspector pills) and aren't a per-detection
+    accept/reject signal.
+    """
+
+    frame_idx: int
+    det_idx: int
+    class_name: str
+    score: float
+    accepted: bool
+
+
+def iter_detection_rows(rdir: Path) -> list[DetectionRow]:
+    """Flatten a run's per-frame detections into one ordered list.
+
+    Reads `per_frame.jsonl` once and `frame_states.json` once, then walks
+    each frame's detections in original `det_idx` order. Returned rows are
+    in the natural file order (frame asc, det_idx asc); callers sort.
+    """
+    states = read_frame_states(rdir)
+    rows: list[DetectionRow] = []
+    for rec in read_per_frame(rdir):
+        try:
+            fi = int(rec.get("frame_idx", -1))
+        except (TypeError, ValueError):
+            continue
+        if fi < 0:
+            continue
+        entry = states.get(fi)
+        rejected = (
+            set(entry.get("rejected_dets", []))
+            if entry and entry.get("state") == "curated"
+            else set()
+        )
+        for di, d in enumerate(rec.get("detections") or []):
+            try:
+                score = float(d.get("score", 0.0))
+            except (TypeError, ValueError):
+                score = 0.0
+            cls = d.get("class_name") or f"class_{d.get('class_id', '?')}"
+            rows.append(
+                DetectionRow(
+                    frame_idx=fi,
+                    det_idx=di,
+                    class_name=str(cls),
+                    score=score,
+                    accepted=di not in rejected,
+                )
+            )
+    return rows
+
+
+def detection_bbox_xyxy(
+    rdir: Path, frame_idx: int, det_idx: int
+) -> Optional[tuple[float, float, float, float]]:
+    """Return the bbox (x1, y1, x2, y2) for a specific detection, or None
+    if the frame or det index is missing.
+
+    Streams the per-frame file to avoid loading the whole thing for one
+    crop. The two-level lookup matches what the crop endpoint does.
+    """
+    pf_path = rdir / LABELS_DIR / PER_FRAME_NAME
+    if not pf_path.exists():
+        return None
+    with pf_path.open("r") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if int(rec.get("frame_idx", -1)) != frame_idx:
+                continue
+            dets = rec.get("detections") or []
+            if not (0 <= det_idx < len(dets)):
+                return None
+            bbox = dets[det_idx].get("bbox_xyxy")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                return None
+            try:
+                return (
+                    float(bbox[0]),
+                    float(bbox[1]),
+                    float(bbox[2]),
+                    float(bbox[3]),
+                )
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def crops_dir(rdir: Path) -> Path:
+    """Path to the on-disk crop cache for this run."""
+    return rdir / CROPS_DIR
+
+
+def detection_crop_path(rdir: Path, frame_idx: int, det_idx: int, pad: int) -> Path:
+    """Where a single (frame, det, pad) crop is cached.
+
+    Pad goes in the filename so changing the slider invalidates the cache
+    naturally (different file). Padding is bucketed to a positive integer
+    by the endpoint.
+    """
+    return crops_dir(rdir) / f"{frame_idx}_{det_idx}_p{pad}.jpg"
 
 
 # ---- Delete a run ---------------------------------------------------------

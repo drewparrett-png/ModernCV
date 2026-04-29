@@ -1,6 +1,7 @@
 import type {
   ArchitecturesResponse,
   BlocksResponse,
+  DetectionsResponse,
   FrameState,
   FrameStateEntry,
   FrameStatesMap,
@@ -241,6 +242,37 @@ export async function deleteFrameState(
   if (!res.ok && res.status !== 404) {
     throw new Error(`DELETE .../frame_states/${frame_idx}: ${res.status}`);
   }
+}
+
+// ---- Detections / crops (Phase 4) --------------------------------------
+
+export async function fetchDetections(
+  projectId: string,
+  id: string,
+  opts: { sort?: "score_asc"; limit?: number; offset?: number } = {},
+): Promise<DetectionsResponse> {
+  const params = new URLSearchParams();
+  params.set("sort", opts.sort ?? "score_asc");
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+  const res = await fetch(
+    `${p(projectId)}/runs/${encodeURIComponent(id)}/detections?${params.toString()}`,
+  );
+  if (!res.ok) throw new Error(`GET .../detections: ${res.status}`);
+  return (await res.json()) as DetectionsResponse;
+}
+
+export function detectionCropUrl(
+  projectId: string,
+  id: string,
+  frame_idx: number,
+  det_idx: number,
+  pad = 24,
+): string {
+  return (
+    `${p(projectId)}/runs/${encodeURIComponent(id)}` +
+    `/detection_crop/${frame_idx}/${det_idx}.jpg?pad=${pad}`
+  );
 }
 
 // ---- Delete a run -------------------------------------------------------

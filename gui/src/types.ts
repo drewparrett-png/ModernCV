@@ -126,6 +126,21 @@ export interface FrameStateEntry {
  *  unreviewed. */
 export type FrameStatesMap = Record<string, FrameStateEntry>;
 
+/** Phase 4: one row of the run-level flat detection list, used by
+ *  CropReview. `accepted` is derived server-side from frame_states. */
+export interface DetectionRow {
+  frame_idx: number;
+  det_idx: number;
+  class_name: string;
+  score: number;
+  accepted: boolean;
+}
+
+export interface DetectionsResponse {
+  detections: DetectionRow[];
+  total: number;
+}
+
 export interface RunManifest {
   id: string;
   project_id: string;

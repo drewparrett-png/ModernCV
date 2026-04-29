@@ -273,6 +273,34 @@ class FrameStatesResponse(BaseModel):
     frame_states: dict[str, FrameStateEntry] = Field(default_factory=dict)
 
 
+class DetectionRowModel(BaseModel):
+    """One row of the run-level detections list (Phase 4 crop-flip review).
+
+    `accepted` is derived: false iff the frame's state is `curated` AND the
+    det index is in `rejected_dets`. Whole-frame verdicts (`confirmed_empty`,
+    `marked_missed`) are not surfaced here — they aren't per-detection
+    accept/reject signals.
+    """
+
+    frame_idx: int
+    det_idx: int
+    class_name: str
+    score: float
+    accepted: bool
+
+
+class DetectionsResponse(BaseModel):
+    """Body of `GET /projects/{pid}/runs/{rid}/detections`.
+
+    `total` is the unfiltered count of all detections at the floor — it
+    powers the "47 / 312" position-in-list indicator on the GUI side and
+    stays stable across pagination.
+    """
+
+    detections: list[DetectionRowModel] = Field(default_factory=list)
+    total: int = 0
+
+
 class PutFrameStateRequest(BaseModel):
     """Body of `PUT /projects/{pid}/runs/{rid}/frame_states/{frame_idx}`.
 
