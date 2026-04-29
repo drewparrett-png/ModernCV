@@ -14,11 +14,13 @@
  */
 
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type MouseEvent,
 } from "react";
 import { useStore } from "../store";
 import {
@@ -34,6 +36,42 @@ import type { DetectionRow, FrameStatesMap } from "../types";
 
 const PREFETCH_AHEAD = 3;
 const CROP_PAD = 24;
+
+type SegColor = "accepted" | "rejected" | "unreviewed";
+
+const LabelStrip = memo(function LabelStrip({
+  colors,
+  index,
+  onJump,
+}: {
+  colors: SegColor[];
+  index: number;
+  onJump: (i: number) => void;
+}) {
+  const total = colors.length;
+  function handleClick(e: MouseEvent<HTMLDivElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const i = Math.min(
+      total - 1,
+      Math.floor(((e.clientX - rect.left) / rect.width) * total),
+    );
+    onJump(i);
+  }
+  return (
+    <div
+      className="crop-label-strip"
+      onClick={handleClick}
+      title="Click to navigate to a crop"
+    >
+      {colors.map((c, i) => (
+        <span
+          key={i}
+          className={`strip-seg strip-seg-${c}${i === index ? " strip-cursor" : ""}`}
+        />
+      ))}
+    </div>
+  );
+});
 
 interface UndoEntry {
   /** Position in the detection list at the time of the action — restored
@@ -58,6 +96,7 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
   const [index, setIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [resumeToast, setResumeToast] = useState<string | null>(null);
 
   // Action history for U-key undo. Bounded so a long session doesn't
   // grow unbounded — 50 is plenty for "I just hit the wrong key" recovery.
@@ -67,18 +106,39 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
     if (!projectId || !runId) return;
     setError(null);
     setLoaded(false);
+    setResumeToast(null);
     Promise.all([
       fetchDetections(projectId, runId, { sort: "score_asc" }),
       fetchFrameStates(projectId, runId),
     ])
       .then(([resp, fs]) => {
-        setDetections(resp.detections.filter((d) => d.score >= threshold));
+        const dets = resp.detections.filter((d) => d.score >= threshold);
+        const firstUnlabeled = dets.findIndex((d) => !fs[String(d.frame_idx)]);
+        // -1 → all labeled, start at 0, no toast
+        //  0 → session never started, start at 0, no toast
+        // >0 → mid-session, jump to first unlabeled + show toast
+        const startIdx = firstUnlabeled > 0 ? firstUnlabeled : 0;
+        setDetections(dets);
         setFrameStates(fs);
-        setIndex(0);
+        setIndex(startIdx);
         setLoaded(true);
+        if (firstUnlabeled > 0) {
+          const unlabeledCount = dets.filter(
+            (d) => !fs[String(d.frame_idx)],
+          ).length;
+          setResumeToast(
+            `Resumed from crop ${firstUnlabeled + 1} · ${unlabeledCount} unlabeled remaining`,
+          );
+        }
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [projectId, runId]);
+  }, [projectId, runId, threshold]);
+
+  useEffect(() => {
+    if (!resumeToast) return;
+    const t = setTimeout(() => setResumeToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [resumeToast]);
 
   // Live `accepted` view: derived from `frameStates`, not from the static
   // server response. The server snapshot is the initial state; subsequent
@@ -105,6 +165,16 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
     }
     return n;
   }, [liveDetections, frameStates]);
+
+  const stripColors = useMemo<SegColor[]>(
+    () =>
+      liveDetections.map((d) => {
+        const entry = frameStates[String(d.frame_idx)];
+        if (!entry) return "unreviewed";
+        return d.accepted ? "accepted" : "rejected";
+      }),
+    [liveDetections, frameStates],
+  );
 
   // Persist the current frame's intended `rejected_dets` for the given
   // detection. Returns the prior frame entry (for undo) or null if the
@@ -287,6 +357,9 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
 
         {error && <div className="inspector-error">Failed to load: {error}</div>}
         {!error && !loaded && <div className="inspector-loading">Loading…</div>}
+        {loaded && total > 0 && (
+          <LabelStrip colors={stripColors} index={index} onJump={setIndex} />
+        )}
         {loaded && total === 0 && (
           <div className="inspector-empty">
             No detections in this run. Crop review is empty.
@@ -316,6 +389,9 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
               >
                 {cur.accepted ? "Accepted" : "Rejected"}
               </div>
+              {resumeToast && (
+                <div className="crop-resume-toast">{resumeToast}</div>
+              )}
             </div>
             <aside className="crop-review-sidebar">
               <div className="crop-review-meta">
