@@ -47,12 +47,14 @@ PROJECTS_DIR = "projects"
 PROJECT_FILE = "project.json"
 TEACHERS_DIR = "teachers"
 STUDENTS_DIR = "students"
+STUDENT_RUNS_DIR = "student_runs"
 MANIFEST_NAME = "manifest.json"
 STATS_NAME = "stats.json"
 PROGRESS_NAME = "progress.json"
 FRAME_STATES_NAME = "frame_states.json"
 OVERLAY_NAME = "overlay.mp4"
 LABELS_DIR = "labels"
+PREDICTIONS_DIR = "predictions"
 COCO_NAME = "coco.json"
 PER_FRAME_NAME = "per_frame.jsonl"
 CROPS_DIR = "crops"
@@ -102,6 +104,16 @@ def students_dir(project_id: str, runs_root: Path = RUNS_DIR) -> Path:
     return project_dir(project_id, runs_root) / STUDENTS_DIR
 
 
+def student_runs_root(project_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    """Phase 5: project-level top-level dir holding all student-run dirs.
+
+    On disk: `runs/projects/<pid>/student_runs/<sid>/<rid>/`. The middle
+    `<sid>` partition keeps a Student's runs grouped without forcing
+    callers to scan every run when listing one Student's history.
+    """
+    return project_dir(project_id, runs_root) / STUDENT_RUNS_DIR
+
+
 def write_project(pdir: Path, project: Project) -> None:
     (pdir / PROJECT_FILE).write_text(project.to_json())
 
@@ -129,6 +141,7 @@ def create_project(
     pdir.mkdir(parents=True, exist_ok=False)
     (pdir / TEACHERS_DIR).mkdir()
     (pdir / STUDENTS_DIR).mkdir()
+    (pdir / STUDENT_RUNS_DIR).mkdir()
 
     project = Project(
         id=project_id,
@@ -765,6 +778,23 @@ def mark_stale_runs_failed(runs_root: Path = RUNS_DIR) -> int:
                         n += 1
                 except Exception as e:  # pragma: no cover
                     log.warning("could not patch student %s: %s", p, e)
+        # Phase 5: student_runs/<sid>/<rid>/manifest.json — same shape, just
+        # one more level of nesting because runs partition by student id.
+        srdir = pdir / STUDENT_RUNS_DIR
+        if srdir.exists():
+            for sub in srdir.iterdir():
+                if not sub.is_dir():
+                    continue
+                for p in sub.iterdir():
+                    if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+                        continue
+                    try:
+                        sm = read_student_run_manifest(p)
+                        if sm.status in _STALE_STATES:
+                            mark_student_run_failed(p, _STALE_INTERRUPT_MSG)
+                            n += 1
+                    except Exception as e:  # pragma: no cover
+                        log.warning("could not patch student_run %s: %s", p, e)
     if n:
         log.info("marked %d stale running/queued runs as failed at startup", n)
     return n
@@ -926,19 +956,223 @@ def mark_student_failed(rdir: Path, error: str) -> StudentManifest:
     return manifest
 
 
+# ---- Student-run (Phase 5) ------------------------------------------------
+
+
+@dataclass
+class StudentRunManifest:
+    """A trained Student running inference against an arbitrary input.
+
+    Lives at `runs/projects/<pid>/student_runs/<sid>/<rid>/manifest.json`.
+    `input_kind` discriminates the union: `"video"` means `input_ref` is
+    a path under `data/`, `"teacher_dataset"` means `input_ref` is a
+    Teacher run id within the same project — the Teacher's source video
+    becomes the input and its COCO labels become ground truth for mAP.
+    """
+
+    id: str  # "studentrun_<ts>_<slug>"
+    student_id: str
+    project_id: str
+    input_kind: str  # "video" | "teacher_dataset"
+    input_ref: str
+    started_at: str
+    ended_at: Optional[str] = None
+    status: str = "running"  # "queued" | "running" | "completed" | "failed"
+    error: Optional[str] = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2)
+
+
+@dataclass
+class StudentRunStats:
+    """Inference summary for one Student run.
+
+    `n_frames` is what was processed end-to-end. Latency numbers are
+    measured per-frame around the trainer's `predict` call so they're
+    comparable to the timing the Student's own training stats reported.
+    `map50` / `map50_95` are populated only when the input was a teacher
+    dataset (we have ground truth); video-input runs leave them at 0.0
+    and the GUI hides those rows.
+    """
+
+    n_frames: int = 0
+    n_detections: int = 0
+    avg_inference_ms: float = 0.0
+    p50_inference_ms: float = 0.0
+    p95_inference_ms: float = 0.0
+    map50: Optional[float] = None
+    map50_95: Optional[float] = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2)
+
+
+def make_student_run_id(now: Optional[datetime] = None) -> str:
+    """Sortable id for a student-run: studentrun_<utc>_<slug>.
+
+    The slug is just `run` — student-run dirs are partitioned under the
+    student id already, and the timestamp suffices for ordering. Adding
+    a per-input slug would invite confusion when two runs against the
+    same input dir collide on the same second.
+    """
+    now = now or datetime.now(timezone.utc)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+    return f"studentrun_{ts}_run"
+
+
+def student_run_parent_dir(
+    project_id: str, student_id: str, runs_root: Path = RUNS_DIR
+) -> Path:
+    """All runs for one Student live here."""
+    return student_runs_root(project_id, runs_root) / student_id
+
+
+def student_run_dir(
+    project_id: str,
+    student_id: str,
+    run_id: str,
+    runs_root: Path = RUNS_DIR,
+) -> Path:
+    """Path to one student-run dir."""
+    return student_run_parent_dir(project_id, student_id, runs_root) / run_id
+
+
+def write_student_run_manifest(rdir: Path, manifest: StudentRunManifest) -> None:
+    (rdir / MANIFEST_NAME).write_text(manifest.to_json())
+
+
+def read_student_run_manifest(rdir: Path) -> StudentRunManifest:
+    raw = json.loads((rdir / MANIFEST_NAME).read_text())
+    known = {f for f in StudentRunManifest.__dataclass_fields__}
+    return StudentRunManifest(**{k: v for k, v in raw.items() if k in known})
+
+
+def write_student_run_stats(rdir: Path, stats: StudentRunStats) -> None:
+    (rdir / STATS_NAME).write_text(stats.to_json())
+
+
+def read_student_run_stats(rdir: Path) -> Optional[StudentRunStats]:
+    p = rdir / STATS_NAME
+    if not p.exists():
+        return None
+    raw = json.loads(p.read_text())
+    known = {f for f in StudentRunStats.__dataclass_fields__}
+    return StudentRunStats(**{k: v for k, v in raw.items() if k in known})
+
+
+def create_student_run(
+    *,
+    project_id: str,
+    student_id: str,
+    input_kind: str,
+    input_ref: str,
+    runs_root: Path = RUNS_DIR,
+) -> tuple[Path, StudentRunManifest]:
+    """Allocate a fresh student-run dir + initial 'running' manifest.
+
+    The PREDICTIONS_DIR is created up-front so writers can append without
+    worrying about whether their parent exists. We do NOT create the
+    `overlay.mp4` placeholder — the OverlayMp4Writer is lazy about that.
+    """
+    if input_kind not in {"video", "teacher_dataset"}:
+        raise ValueError(f"unknown input_kind: {input_kind!r}")
+
+    sdir = student_dir(project_id, student_id, runs_root)
+    if not (sdir / MANIFEST_NAME).exists():
+        raise FileNotFoundError(f"no such student: {student_id}")
+
+    run_id = make_student_run_id()
+    parent = student_run_parent_dir(project_id, student_id, runs_root)
+    parent.mkdir(parents=True, exist_ok=True)
+    rdir = parent / run_id
+    rdir.mkdir(parents=True, exist_ok=False)
+    (rdir / PREDICTIONS_DIR).mkdir()
+
+    manifest = StudentRunManifest(
+        id=run_id,
+        student_id=student_id,
+        project_id=project_id,
+        input_kind=input_kind,
+        input_ref=input_ref,
+        started_at=_now_iso(),
+    )
+    write_student_run_manifest(rdir, manifest)
+    return rdir, manifest
+
+
+def mark_student_run_completed(
+    rdir: Path, stats: Optional[StudentRunStats] = None
+) -> StudentRunManifest:
+    manifest = read_student_run_manifest(rdir)
+    manifest.status = "completed"
+    manifest.ended_at = _now_iso()
+    write_student_run_manifest(rdir, manifest)
+    if stats is not None:
+        write_student_run_stats(rdir, stats)
+    return manifest
+
+
+def mark_student_run_failed(rdir: Path, error: str) -> StudentRunManifest:
+    manifest = read_student_run_manifest(rdir)
+    manifest.status = "failed"
+    manifest.error = error
+    manifest.ended_at = _now_iso()
+    write_student_run_manifest(rdir, manifest)
+    return manifest
+
+
+def list_student_runs(
+    project_id: str, student_id: str, runs_root: Path = RUNS_DIR
+) -> list[StudentRunManifest]:
+    """Manifests for one Student's runs, newest first.
+
+    Returns an empty list if the student has no runs (or the dir doesn't
+    exist) rather than raising — the GUI calls this on every Student
+    detail open and a missing dir is the common case.
+    """
+    parent = student_run_parent_dir(project_id, student_id, runs_root)
+    if not parent.exists():
+        return []
+    out: list[StudentRunManifest] = []
+    for p in parent.iterdir():
+        if not p.is_dir() or not (p / MANIFEST_NAME).exists():
+            continue
+        try:
+            out.append(read_student_run_manifest(p))
+        except Exception as e:  # pragma: no cover — corrupt manifest
+            log.warning("could not read student-run manifest at %s: %s", p, e)
+    out.sort(key=lambda m: m.started_at, reverse=True)
+    return out
+
+
+def delete_student_run(rdir: Path) -> None:
+    """Recursively remove a student-run directory."""
+    import shutil
+
+    if not rdir.exists():
+        return
+    shutil.rmtree(rdir)
+
+
 # ---- Per-frame labels (jsonl) ---------------------------------------------
 
 
 class PerFrameWriter:
-    """Append-only writer for `labels/per_frame.jsonl`.
+    """Append-only writer for `<labels|predictions>/per_frame.jsonl`.
 
     Each line is a small JSON object: {"frame_idx": int, "detections": [...],
     "masks": [...]}. The Inspector fetches this file once and slices
     client-side — small files, no decode-on-seek.
+
+    `subdir` lets Phase 5 student-runs reuse this writer against
+    `predictions/per_frame.jsonl` without forking the body. The default
+    `LABELS_DIR` keeps Teacher behavior unchanged.
     """
 
-    def __init__(self, rdir: Path):
-        self.path = rdir / LABELS_DIR / PER_FRAME_NAME
+    def __init__(self, rdir: Path, subdir: str = LABELS_DIR):
+        self.path = rdir / subdir / PER_FRAME_NAME
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fp = self.path.open("w")
 
     def write(self, frame_idx: int, detections: list[dict], masks: list[dict] | None = None) -> None:

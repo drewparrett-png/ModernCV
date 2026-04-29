@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Protocol
+from typing import Any, Callable, Iterable, Iterator, Optional, Protocol
 
 
 # Frames sampled for inference timing. Pulled into `base.py` so trainers
@@ -108,5 +108,25 @@ class StudentTrainer(Protocol):
         kernel compilation, JIT warm-up and weight-to-device transfer
         all land on call #1 and would skew the median otherwise. The
         returned numbers reflect what the user actually feels at runtime.
+        """
+        ...
+
+    def predict(
+        self,
+        *,
+        weights: Path,
+        frames: Iterable[Any],
+    ) -> Iterator[list[dict]]:
+        """Stream per-frame predictions over a frame iterator (Phase 5).
+
+        `frames` yields HxWx3 uint8 BGR `np.ndarray` images. The trainer
+        loads the model once and yields one list of detection dicts per
+        frame — same shape as `pipeline.runs.detection_to_dict` produces:
+        `{bbox_xyxy: [x1,y1,x2,y2], score: float, class_id: int, class_name: str}`.
+
+        Used by `pipeline.student_run` to drive a Student against a video
+        end-to-end. Implementations should NOT keep the full prediction
+        list in memory — yield one frame's worth at a time so memory
+        stays flat across long videos.
         """
         ...

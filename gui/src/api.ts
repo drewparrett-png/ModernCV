@@ -18,6 +18,9 @@ import type {
   RunResponse,
   RunsResponse,
   StudentDetail,
+  StudentRunDetail,
+  StudentRunRequest,
+  StudentRunsResponse,
   StudentsResponse,
   VideosResponse,
 } from "./types";
@@ -373,4 +376,89 @@ export async function previewBuckets(
     throw new Error(`POST .../preview-buckets: ${res.status} ${text}`);
   }
   return res.json();
+}
+
+// ---- Student-run (Phase 5) ----------------------------------------------
+
+export async function startStudentRun(
+  projectId: string,
+  studentId: string,
+  req: StudentRunRequest,
+): Promise<StudentRunDetail> {
+  const res = await fetch(
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}/run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST .../run: ${res.status} ${text}`);
+  }
+  return res.json();
+}
+
+export async function fetchStudentRuns(
+  projectId: string,
+  studentId: string,
+): Promise<StudentRunsResponse> {
+  const res = await fetch(
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}/runs`,
+  );
+  if (!res.ok) throw new Error(`GET .../runs: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchStudentRunDetail(
+  projectId: string,
+  studentId: string,
+  runId: string,
+): Promise<StudentRunDetail> {
+  const res = await fetch(
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}` +
+      `/runs/${encodeURIComponent(runId)}`,
+  );
+  if (!res.ok) throw new Error(`GET .../runs/${runId}: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteStudentRun(
+  projectId: string,
+  studentId: string,
+  runId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}` +
+      `/runs/${encodeURIComponent(runId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`DELETE .../runs/${runId}: ${res.status}`);
+  }
+}
+
+export function studentRunOverlayUrl(
+  projectId: string,
+  studentId: string,
+  runId: string,
+): string {
+  return (
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}` +
+    `/runs/${encodeURIComponent(runId)}/overlay.mp4`
+  );
+}
+
+export function studentRunFrameUrl(
+  projectId: string,
+  studentId: string,
+  runId: string,
+  idx: number,
+  source: "raw" | "overlay" = "overlay",
+): string {
+  return (
+    `${p(projectId)}/students/${encodeURIComponent(studentId)}` +
+    `/runs/${encodeURIComponent(runId)}/frame/${idx}?source=${source}`
+  );
 }
