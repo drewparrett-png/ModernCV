@@ -254,3 +254,77 @@ def test_empty_teacher_list_returns_zero_aggregate(
     assert body["aggregate"]["n_classes"] == 0
     assert body["aggregate"]["class_names"] == []
     assert body["per_teacher"] == []
+
+
+# ---- Frame-state integration tests ----------------------------------------
+
+
+def _write_frame_states(project_id: str, teacher_id: str, states: dict) -> None:
+    tdir = runs_mod.run_dir(project_id, teacher_id)
+    runs_mod.write_frame_states(tdir, states)
+
+
+def test_marked_missed_frame_not_counted(client: TestClient, project: str) -> None:
+    """marked_missed frames are excluded entirely — positive count drops."""
+    images, anns = _coco_classifiable(n_positive=2, n_uncertain=0, n_true_negative=0)
+    _write_teacher(project, "teacher_a", images=images, annotations=anns)
+    # frame 0 is positive (score 0.9); mark it missed — should disappear
+    _write_frame_states(project, "teacher_a", {0: {"state": "marked_missed"}})
+
+    res = client.post(
+        f"/projects/{project}/students/preview-buckets",
+        json={"teacher_ids": ["teacher_a"]},
+    )
+    assert res.status_code == 200
+    agg = res.json()["aggregate"]
+    assert agg["positive"] == 1
+    assert agg["uncertain"] == 0
+    assert agg["true_negative"] == 0
+
+
+def test_confirmed_empty_frame_becomes_true_negative(
+    client: TestClient, project: str
+) -> None:
+    """confirmed_empty clears annotations — previously-positive frame becomes true_negative."""
+    images, anns = _coco_classifiable(n_positive=1, n_uncertain=0, n_true_negative=1)
+    _write_teacher(project, "teacher_a", images=images, annotations=anns)
+    # frame 0 is positive; confirm it is empty → should become true_negative
+    _write_frame_states(project, "teacher_a", {0: {"state": "confirmed_empty"}})
+
+    res = client.post(
+        f"/projects/{project}/students/preview-buckets",
+        json={"teacher_ids": ["teacher_a"]},
+    )
+    assert res.status_code == 200
+    agg = res.json()["aggregate"]
+    assert agg["positive"] == 0
+    assert agg["uncertain"] == 0
+    assert agg["true_negative"] == 2
+
+
+def test_curated_rejected_detection_shifts_bucket(
+    client: TestClient, project: str
+) -> None:
+    """curated + rejected detection: frame's only annotation removed → true_negative."""
+    images = [{"id": 0, "width": 100, "height": 100}]
+    anns = [
+        {
+            "id": 0, "image_id": 0, "category_id": 0,
+            "bbox": [0, 0, 10, 10], "score": 0.9, "det_idx": 0,
+        }
+    ]
+    _write_teacher(project, "teacher_a", images=images, annotations=anns)
+    # reject the one detection — frame now has no annotations → true_negative
+    _write_frame_states(
+        project, "teacher_a", {0: {"state": "curated", "rejected_dets": [0]}}
+    )
+
+    res = client.post(
+        f"/projects/{project}/students/preview-buckets",
+        json={"teacher_ids": ["teacher_a"]},
+    )
+    assert res.status_code == 200
+    agg = res.json()["aggregate"]
+    assert agg["positive"] == 0
+    assert agg["uncertain"] == 0
+    assert agg["true_negative"] == 1
