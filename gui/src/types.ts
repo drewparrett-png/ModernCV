@@ -134,7 +134,7 @@ export interface DetectionRow {
   det_idx: number;
   class_name: string;
   score: number;
-  accepted: boolean;
+  accepted: boolean | null;
 }
 
 export interface DetectionsResponse {

@@ -147,7 +147,9 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
     return detections.map((d) => {
       const entry = frameStates[String(d.frame_idx)];
       const accepted =
-        entry?.state === "curated" && entry.rejected_dets.includes(d.det_idx)
+        entry === undefined
+          ? null
+          : entry.state === "curated" && entry.rejected_dets.includes(d.det_idx)
           ? false
           : true;
       return { ...d, accepted };
@@ -384,10 +386,14 @@ export function CropReview({ onClose, threshold = 0 }: Props) {
               <div
                 className={
                   "crop-review-verdict " +
-                  (cur.accepted ? "verdict-accepted" : "verdict-rejected")
+                  (cur.accepted === null
+                    ? "verdict-unreviewed"
+                    : cur.accepted
+                    ? "verdict-accepted"
+                    : "verdict-rejected")
                 }
               >
-                {cur.accepted ? "Accepted" : "Rejected"}
+                {cur.accepted === null ? "Unreviewed" : cur.accepted ? "Accepted" : "Rejected"}
               </div>
               {resumeToast && (
                 <div className="crop-resume-toast">{resumeToast}</div>
