@@ -3155,6 +3155,11 @@ html, body, #root {
   color: white;
 }
 
+.verdict-unreviewed {
+  background: rgba(107, 114, 128, 0.9);
+  color: white;
+}
+
 .crop-review-sidebar {
   display: flex;
   flex-direction: column;
