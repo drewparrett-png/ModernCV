@@ -1,4 +1,4 @@
-"""Studio API — YOLO26 image datasets, prompting, training, testing, Pal/DePal.
+"""Studio API — YOLO26 / YOLO11 image datasets, prompting, training, testing, Pal/DePal.
 
 All routes are project-scoped under /projects/{pid}/studio except the
 global model catalog.
@@ -185,6 +185,7 @@ class PredictBody(BaseModel):
 class TrainBody(BaseModel):
     task: str = "detect"
     size: str = "n"
+    family: str = "26"
     base: str = "pretrained"
     name: Optional[str] = None
     config: dict = Field(default_factory=dict)

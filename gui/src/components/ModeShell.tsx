@@ -23,7 +23,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { mode: "learn", label: "Learn", blurb: "Teach the system from scratch" },
   { mode: "optimize", label: "Optimize", blurb: "Distill a fast student" },
-  { mode: "studio", label: "Studio", blurb: "YOLO26 · prompt, train, test, pallets" },
+  { mode: "studio", label: "Studio", blurb: "YOLO26 / YOLO11 · prompt, train, test, pallets" },
 ];
 
 export function ModeShell() {

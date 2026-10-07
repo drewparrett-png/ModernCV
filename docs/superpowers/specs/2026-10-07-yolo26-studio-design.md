@@ -148,6 +148,33 @@ stack in a corridor) and synthetic renders:
   process; trainers keep running and are re-adopted by PID on startup
   (queued jobs are re-queued).
 
+## Model families (2026-10-07, follow-up)
+
+Pretrained specs are `{"kind": "yolo", "family": "26" | "11", task, size}`
+(the original `{"kind": "yolo26"}` is still accepted, e.g. in saved tracking
+jobs). Trained models record `family` in `model.json`; manifests without it
+are YOLO26. Fine-tuning inherits the parent's family and size. Only YOLO26
+has the NMS-free end-to-end head, so the head toggle and `end2end` are
+applied to YOLO26 checkpoints only; YOLO11 always runs NMS.
+
+**YOLO26n-seg vs YOLO11n-seg** — same 38 labelled images (30 train / 8
+val, 304 cartons), same split, 40 epochs, 640 px, batch 8, same
+augmentation, one run each:
+
+| | YOLO26n-seg | YOLO11n-seg |
+|---|---|---|
+| Box mAP50 / mAP50-95 | 0.513 / 0.417 | 0.639 / 0.507 |
+| Mask mAP50 / mAP50-95 | 0.503 / 0.385 | 0.603 / 0.456 |
+| Precision / recall (mask) | 0.60 / 0.50 | 0.93 / 0.50 |
+| Cartons found on 3 held-out pallets (conf 0.25) | 5 + 0 + 4 | 6 + 6 + 10 |
+| Height error on matched cartons (RGB-D) | 0.0 mm | ≤ 0.1 mm |
+| Latency p50, CPU / MPS | 31 / 29 ms | 33 / 48 ms |
+
+YOLO11n came out ahead at this data size. The YOLO26 run's wall time
+(643 s vs 323 s) is not comparable — other GPU work ran alongside it. With
+only 8 validation images this is a noisy single comparison; re-run both on
+real images before choosing. YOLO26 stays the default family.
+
 ## Out of scope (for now)
 
 Pose-keypoint and classification *training* (no keypoint / image-tag

@@ -26,7 +26,7 @@ import "./test.css";
 
 // ---- Settings ----------------------------------------------------------------
 
-const DEFAULT_MODEL: ModelSpec = { kind: "yolo26", task: "segment", size: "n" };
+const DEFAULT_MODEL: ModelSpec = { kind: "yolo", family: "26", task: "segment", size: "n" };
 const IMGSZ = [224, 320, 416, 480, 512, 640, 768, 896, 1024, 1280];
 const DEBOUNCE_MS = 300;
 const POLL_MS = 2000;
@@ -119,7 +119,7 @@ function isTyping(e: KeyboardEvent): boolean {
 /** The task a spec runs, when knowable up front (YOLOE checkpoints are -seg models). */
 function specTask(spec: ModelSpec, models: TrainedModel[]): YoloTask | null {
   switch (spec.kind) {
-    case "yolo26":
+    case "yolo":
       return spec.task;
     case "trained":
       return models.find((m) => m.id === spec.model_id)?.task ?? null;
@@ -135,10 +135,17 @@ function predictIssue(spec: ModelSpec): string | null {
   return null;
 }
 
-/** Track mode needs boxes, and the tracker job loads YOLO26, trained or YOLOE text models only. */
+/** Only YOLO26 checkpoints (pretrained or trained from YOLO26) have the end-to-end head. */
+function isYolo26(spec: ModelSpec, models: TrainedModel[]): boolean {
+  if (spec.kind === "yolo") return spec.family === "26";
+  if (spec.kind === "trained") return (models.find((m) => m.id === spec.model_id)?.family ?? "26") === "26";
+  return false;
+}
+
+/** Track mode needs boxes, and the tracker job loads YOLO, trained or YOLOE text models only. */
 function trackIssue(spec: ModelSpec): string | null {
-  if (spec.kind === "yoloe-pf") return "Prompt-free YOLOE can't track — pick YOLO26, a trained model or a YOLOE text prompt above.";
-  if (spec.kind === "yolo26" && spec.task === "classify") return "Classifiers don't output boxes to track — pick Detect, Segment, Pose or OBB above.";
+  if (spec.kind === "yoloe-pf") return "Prompt-free YOLOE can't track — pick YOLO26 / YOLO11, a trained model or a YOLOE text prompt above.";
+  if (spec.kind === "yolo" && spec.task === "classify") return "Classifiers don't output boxes to track — pick Detect, Segment, Pose or OBB above.";
   return predictIssue(spec);
 }
 
@@ -261,7 +268,8 @@ export function TestView() {
   const imageIdx = image ? images.indexOf(image) : -1;
   const task = specTask(model, models);
   const boxTask = task !== "classify";
-  const headApplies = (model.kind === "yolo26" || model.kind === "trained") && boxTask;
+  const headApplies = isYolo26(model, models) && boxTask;
+  const nmsOnly = !isYolo26(model, models) && (model.kind === "yolo" || model.kind === "trained") && boxTask;
   const iouIgnored = headApplies && opts.head !== "nms";
   const filter = useMemo(() => parseClassFilter(opts.classes), [opts.classes]);
   const modelKey = useMemo(() => JSON.stringify(model), [model]);
@@ -517,6 +525,9 @@ export function TestView() {
               </div>
               <p className="st-test-hint">YOLO26 predicts end-to-end without NMS; switch to the one-to-many head + NMS to compare.</p>
             </div>
+          )}
+          {nmsOnly && (
+            <p className="st-test-hint">YOLO11 has a single one-to-many head and always uses NMS (the IoU slider applies).</p>
           )}
         </Section>
 

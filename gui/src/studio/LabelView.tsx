@@ -73,7 +73,7 @@ export function LabelView() {
   const [autoScope, setAutoScope] = useState<Scope>("image");
   const [autoRefine, setAutoRefine] = useState(false);
   const [textSpec, setTextSpec] = useState<ModelSpec>({ kind: "yoloe-text", family: "11", size: "s", classes: ["carton"] });
-  const [assistSpec, setAssistSpec] = useState<ModelSpec>({ kind: "yolo26", task: "segment", size: "n" });
+  const [assistSpec, setAssistSpec] = useState<ModelSpec>({ kind: "yolo", family: "26", task: "segment", size: "n" });
   const [assistConf, setAssistConf] = useState(0.25);
   const [assignActive, setAssignActive] = useState(false);
 
@@ -750,7 +750,7 @@ export function LabelView() {
 
           <div className="st-subtle-block">
             <div className="st-add-title">Model assist / prompt-free</div>
-            <ModelPicker value={assistSpec} onChange={setAssistSpec} models={models} catalog={catalog} kinds={["trained", "yolo26", "yoloe-pf"]} tasks={["detect", "segment", "obb"]} />
+            <ModelPicker value={assistSpec} onChange={setAssistSpec} models={models} catalog={catalog} kinds={["trained", "yolo", "yoloe-pf"]} tasks={["detect", "segment", "obb"]} />
             <Toggle label="Assign every detection to the active class" checked={assignActive} onChange={setAssignActive} hint="e.g. COCO 'suitcase' → your 'carton'" />
             <div className="st-row">
               <Slider label="Conf" value={assistConf} min={0.02} max={0.9} step={0.01} onChange={setAssistConf} format={(v) => v.toFixed(2)} />

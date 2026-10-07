@@ -1,4 +1,4 @@
-"""YOLO26 training queue, validation, export and benchmarking for Studio.
+"""YOLO26 / YOLO11 training queue, validation, export and benchmarking for Studio.
 
 Jobs run one at a time (like the Teacher/Student queues) but each in its
 own **subprocess** (`python -m pipeline.studio.train_job <model_dir>`):
@@ -119,35 +119,41 @@ def read_curve(mdir: Path) -> list[dict]:
     return rows
 
 
-def _model_id(task: str, size: str) -> str:
+def _model_id(task: str, size: str, family: str = "26") -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return f"m_{stamp}_{size}-{task}"
+    return f"m_{stamp}_{size}-{task}" if family == "26" else f"m_{stamp}_y{family}{size}-{task}"
 
 
-def base_weights_label(task: str, size: str, base: str) -> str:
+def base_weights_label(task: str, size: str, base: str, family: str = "26") -> str:
     if base == "scratch":
-        return f"yolo26{size}{engines.TASK_SUFFIX[task]}.yaml"
+        return f"yolo{family}{size}{engines.TASK_SUFFIX[task]}.yaml"
     if base.startswith("model:"):
         return base
-    return engines.yolo26_name(task, size)
+    return engines.yolo_name(family, task, size)
 
 
 def start_training(store: StudioStore, req: dict) -> dict:
     task = req.get("task", "detect")
     size = req.get("size", "n")
     base = req.get("base", "pretrained")
+    family = str(req.get("family") or "26")
     if task not in TRAIN_TASKS:
         raise Invalid(f"task must be one of {TRAIN_TASKS}")
     if size not in engines.SIZES:
         raise Invalid(f"size must be one of {engines.SIZES}")
+    if family not in engines.YOLO_FAMILIES:
+        raise Invalid(f"family must be one of {engines.YOLO_FAMILIES}")
     if base not in ("pretrained", "scratch") and not str(base).startswith("model:"):
         raise Invalid("base must be 'pretrained', 'scratch' or 'model:<id>'")
     if str(base).startswith("model:"):
         parent = store.models_dir / check_id(str(base)[6:], "base model id")
         if not (parent / "best.pt").exists():
             raise Invalid(f"can't fine-tune from {base}: it has no trained weights")
-        if read_manifest(parent)["task"] != task:
+        pm = read_manifest(parent)
+        if pm["task"] != task:
             raise Invalid(f"{base} was trained for a different task")
+        # Fine-tuning continues the parent's architecture.
+        family, size = str(pm.get("family") or "26"), pm.get("size", size)
 
     cfg = {**DEFAULT_CONFIG, **{k: v for k, v in (req.get("config") or {}).items() if k in DEFAULT_CONFIG}}
     bad = set(cfg.get("augment") or {}) - AUGMENT_KEYS
@@ -161,7 +167,7 @@ def start_training(store: StudioStore, req: dict) -> dict:
     if not class_ids:
         raise Invalid("add at least one class and label some images first")
 
-    mid = _model_id(task, size)
+    mid = _model_id(task, size, family)
     mdir = store.models_dir / mid
     mdir.mkdir(parents=True, exist_ok=True)
     summary = export_yolo_dataset(store, mdir / "dataset", task, val_pct=int(cfg["val_pct"]), class_ids=class_ids)
@@ -171,11 +177,12 @@ def start_training(store: StudioStore, req: dict) -> dict:
 
     manifest = {
         "id": mid,
-        "name": req.get("name") or f"yolo26{size}-{task} · {cfg['epochs']}ep",
+        "name": req.get("name") or f"yolo{family}{size}-{task} · {cfg['epochs']}ep",
         "task": task,
         "size": size,
+        "family": family,
         "base": base,
-        "base_weights": base_weights_label(task, size, base),
+        "base_weights": base_weights_label(task, size, base, family),
         "status": "queued",
         "created_at": now_iso(),
         "started_at": None,

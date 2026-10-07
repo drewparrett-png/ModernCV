@@ -2,7 +2,8 @@
 
 Model specs (what the GUI sends):
 
-    {"kind": "yolo26",  "task": "detect|segment|classify|pose|obb", "size": "n|s|m|l|x"}
+    {"kind": "yolo",    "family": "26|11", "task": "detect|segment|classify|pose|obb", "size": "n|s|m|l|x"}
+                        ("yolo26" without a family is accepted as YOLO26)
     {"kind": "trained", "model_id": "...", "artifact": "best.pt" | "<export file>"}
     {"kind": "yoloe-text", "family": "26|11", "size": "s|m|l", "classes": ["carton", …]}
     {"kind": "yoloe-pf",   "family": "26|11", "size": "s|m|l"}          # prompt-free
@@ -44,12 +45,15 @@ def resolve_model(store: StudioStore, spec: dict, nms_head: bool = False) -> tup
     """→ (Ultralytics model, human label, is_yolo26_family).
 
     `nms_head` selects the one-to-many + NMS head of YOLO26 checkpoints
-    (see `engines.load_yolo`).
+    (see `engines.load_yolo`); it is ignored for other families, which only
+    have that head.
     """
     kind = spec.get("kind")
-    if kind == "yolo26":
-        name = engines.yolo26_name(spec.get("task", "detect"), spec.get("size", "n"))
-        return engines.load_yolo(engines.ensure_weights(name), nms_head), name.removesuffix(".pt"), True
+    if kind in ("yolo", "yolo26"):
+        fam = engines.spec_family(spec)
+        name = engines.yolo_name(fam, spec.get("task", "detect"), spec.get("size", "n"))
+        is26 = fam == "26"
+        return engines.load_yolo(engines.ensure_weights(name), nms_head and is26), name.removesuffix(".pt"), is26
     if kind == "trained":
         mdir = trained_model_dir(store, str(spec.get("model_id")))
         artifact = check_id(str(spec.get("artifact") or "best.pt"), "artifact")
@@ -59,7 +63,12 @@ def resolve_model(store: StudioStore, spec: dict, nms_head: bool = False) -> tup
         import json
 
         meta = json.loads((mdir / "model.json").read_text())
-        return engines.load_yolo(path, nms_head and artifact == "best.pt"), f"{meta.get('name', mdir.name)} ({artifact})", True
+        is26 = str(meta.get("family") or "26") == "26"
+        return (
+            engines.load_yolo(path, nms_head and is26 and artifact == "best.pt"),
+            f"{meta.get('name', mdir.name)} ({artifact})",
+            is26,
+        )
     if kind in ("yoloe-text", "yoloe-pf"):
         fam, size = str(spec.get("family", "26")), str(spec.get("size", "s"))
         model = engines.load_yoloe(fam, size, prompt_free=(kind == "yoloe-pf"))

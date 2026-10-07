@@ -1,7 +1,7 @@
 /** Small shared controls for the Studio views. */
 
 import { useEffect, useState, type ReactNode } from "react";
-import type { Catalog, ModelSpec, TrainedModel, YoloSize, YoloTask, YoloeFamily, YoloeSize } from "./types";
+import type { Catalog, ModelSpec, TrainedModel, YoloFamily, YoloSize, YoloTask, YoloeFamily, YoloeSize } from "./types";
 
 export function Segmented<T extends string>({
   value,
@@ -110,7 +110,7 @@ const TASK_LABEL: Record<YoloTask, string> = {
 type Kind = ModelSpec["kind"];
 
 export const DEFAULT_SPECS: Record<Kind, ModelSpec> = {
-  yolo26: { kind: "yolo26", task: "segment", size: "n" },
+  yolo: { kind: "yolo", family: "26", task: "segment", size: "n" },
   trained: { kind: "trained", model_id: "" },
   "yoloe-text": { kind: "yoloe-text", family: "26", size: "s", classes: ["carton"] },
   "yoloe-pf": { kind: "yoloe-pf", family: "26", size: "s" },
@@ -118,8 +118,8 @@ export const DEFAULT_SPECS: Record<Kind, ModelSpec> = {
 
 export function specLabel(spec: ModelSpec, models: TrainedModel[]): string {
   switch (spec.kind) {
-    case "yolo26":
-      return `yolo26${spec.size}-${spec.task}`;
+    case "yolo":
+      return `yolo${spec.family}${spec.size}-${spec.task}`;
     case "trained":
       return models.find((m) => m.id === spec.model_id)?.name ?? spec.model_id;
     case "yoloe-text":
@@ -131,14 +131,14 @@ export function specLabel(spec: ModelSpec, models: TrainedModel[]): string {
 
 /**
  * Pick any model Studio can run. `kinds` limits the sources offered and
- * `tasks` limits YOLO26 pretrained tasks (e.g. tracking can't use classify).
+ * `tasks` limits pretrained YOLO tasks (e.g. tracking can't use classify).
  */
 export function ModelPicker({
   value,
   onChange,
   models,
   catalog,
-  kinds = ["trained", "yolo26", "yoloe-text", "yoloe-pf"],
+  kinds = ["trained", "yolo", "yoloe-text", "yoloe-pf"],
   tasks = ["detect", "segment", "classify", "pose", "obb"],
 }: {
   value: ModelSpec;
@@ -158,7 +158,8 @@ export function ModelPicker({
     if (k === "trained") onChange({ kind: "trained", model_id: completed[0]?.id ?? "" });
     else onChange(DEFAULT_SPECS[k]);
   };
-  const cachedYolo = (task: YoloTask, size: YoloSize) => catalog?.yolo26[task]?.find((x) => x.size === size)?.cached;
+  const cachedYolo = (fam: YoloFamily, task: YoloTask, size: YoloSize) =>
+    catalog?.yolo?.[fam]?.[task]?.find((x) => x.size === size)?.cached;
   const cachedYoloe = (f: YoloeFamily, s: YoloeSize, pf: boolean) => {
     const e = catalog?.yoloe.find((x) => x.family === f && x.size === s);
     return pf ? e?.pf_cached : e?.cached;
@@ -168,7 +169,7 @@ export function ModelPicker({
     <div className="st-model-picker">
       <select value={value.kind} onChange={(e) => setKind(e.target.value as Kind)}>
         {kinds.includes("trained") && <option value="trained">Your trained models ({completed.length})</option>}
-        {kinds.includes("yolo26") && <option value="yolo26">YOLO26 pretrained (COCO / DOTA / ImageNet)</option>}
+        {kinds.includes("yolo") && <option value="yolo">YOLO26 / YOLO11 pretrained (COCO / DOTA / ImageNet)</option>}
         {kinds.includes("yoloe-text") && <option value="yoloe-text">YOLOE open-vocab · text prompt</option>}
         {kinds.includes("yoloe-pf") && <option value="yoloe-pf">YOLOE open-vocab · prompt-free</option>}
       </select>
@@ -187,8 +188,17 @@ export function ModelPicker({
           <div className="st-muted">No completed models yet — train one in the Train tab.</div>
         ))}
 
-      {value.kind === "yolo26" && (
+      {value.kind === "yolo" && (
         <>
+          <Segmented
+            size="sm"
+            value={value.family}
+            onChange={(f) => onChange({ ...value, family: f })}
+            options={[
+              { value: "26", label: "YOLO26", title: "Latest: NMS-free end-to-end head" },
+              { value: "11", label: "YOLO11", title: "Previous generation (one-to-many head + NMS) — for comparison" },
+            ]}
+          />
           <Segmented
             size="sm"
             value={value.task}
@@ -204,7 +214,7 @@ export function ModelPicker({
               label: (
                 <>
                   {s}
-                  {!cachedYolo(value.task, s) && <span className="st-dl" title="downloads on first use">↓</span>}
+                  {!cachedYolo(value.family, value.task, s) && <span className="st-dl" title="downloads on first use">↓</span>}
                 </>
               ),
             }))}

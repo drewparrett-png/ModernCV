@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import * as api from "./api";
-import type { BenchRow, PerClassMetric, TrainConfig, TrainedModel, TrainTask, ValResult, YoloSize } from "./types";
+import type { BenchRow, PerClassMetric, TrainConfig, TrainedModel, TrainTask, ValResult, YoloFamily, YoloSize } from "./types";
 import { classColor, useStudio } from "./useStudio";
 import { Section, Segmented, Slider, Toggle, fmtBytes, fmtSecs, pct } from "./widgets";
 import "./train.css";
@@ -112,7 +112,8 @@ const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFin
 const num = (v: unknown): number | null => (isNum(v) ? v : null);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const isLive = (s: Status) => s === "queued" || s === "running";
-const weightsName = (task: TrainTask, size: YoloSize) => `yolo26${size}${TASK_SUFFIX[task]}`;
+const weightsName = (task: TrainTask, size: YoloSize, family: YoloFamily = "26") => `yolo${family}${size}${TASK_SUFFIX[task]}`;
+const familyOf = (m: TrainedModel): YoloFamily => m.family ?? "26";
 const lossName = (key: string) => key.replace(/^train\//, "").replace(/_loss$/, "");
 const firstLine = (s: string | null) => (s ?? "").split("\n").find((l) => l.trim()) ?? "";
 const plotLabel = (name: string) => name.replace(/\.png$/i, "").replace(/_/g, " ");
@@ -293,6 +294,7 @@ function TrainForm({
   const refreshModels = useStudio((s) => s.refreshModels);
 
   const [size, setSize] = useState<YoloSize>("n");
+  const [family, setFamily] = useState<YoloFamily>("26");
   const [baseKind, setBaseKind] = useState<BaseKind>("pretrained");
   const [parentId, setParentId] = useState("");
   const [name, setName] = useState("");
@@ -311,9 +313,11 @@ function TrainForm({
   const kind: BaseKind = baseKind === "model" && !parent ? "pretrained" : baseKind;
   const base = kind === "model" && parent ? `model:${parent.id}` : kind === "scratch" ? "scratch" : "pretrained";
   const effSize: YoloSize = kind === "model" && parent ? parent.size : size;
-  const weights = weightsName(task, effSize);
+  // Fine-tuning continues the parent's architecture, family included.
+  const effFamily: YoloFamily = kind === "model" && parent ? familyOf(parent) : family;
+  const weights = weightsName(task, effSize, effFamily);
   const sizeInfo = SIZE_INFO.find((s) => s.value === effSize) ?? SIZE_INFO[0];
-  const isCached = (s: YoloSize) => catalog?.yolo26[task]?.find((x) => x.size === s)?.cached ?? true;
+  const isCached = (s: YoloSize) => catalog?.yolo?.[effFamily]?.[task]?.find((x) => x.size === s)?.cached ?? true;
 
   // Augmentation: sliders show Ultralytics defaults; only changed keys are sent.
   const allowedAug = new Set(catalog?.augment_keys ?? AUGS.map((a) => a.key));
@@ -352,7 +356,7 @@ function TrainForm({
     };
     setSubmitting(true);
     const m = await run("Queuing training", () =>
-      api.startTraining(pid, { task, size: effSize, base, name: name.trim() || undefined, config }),
+      api.startTraining(pid, { task, size: effSize, family: effFamily, base, name: name.trim() || undefined, config }),
     );
     setSubmitting(false);
     if (!m) return;
@@ -370,12 +374,34 @@ function TrainForm({
   return (
     <>
       <div className="st-train-side-head">
-        <h2>Train a YOLO26 model</h2>
-        <p>Fine-tunes Ultralytics YOLO26 on this project's labels. Runs queue up and train one at a time.</p>
+        <h2>Train a YOLO model</h2>
+        <p>Fine-tunes Ultralytics YOLO26 or YOLO11 on this project's labels. Runs queue up and train one at a time.</p>
       </div>
 
       <Section title="Task">
         <RadioCards value={task} onChange={onTask} options={TASK_OPTIONS} />
+      </Section>
+
+      <Section title="Model family">
+        <Segmented
+          value={effFamily}
+          onChange={setFamily}
+          options={[
+            { value: "26", label: "YOLO26", title: "Latest generation — NMS-free end-to-end head", disabled: kind === "model" },
+            { value: "11", label: "YOLO11", title: "Previous generation — one-to-many head + NMS", disabled: kind === "model" },
+          ]}
+        />
+        <p className="st-train-note">
+          {kind === "model" && parent ? (
+            <>
+              Follows the parent model (<b>YOLO{effFamily}</b>).
+            </>
+          ) : effFamily === "26" ? (
+            "YOLO26: NMS-free end-to-end head, the default. Train a YOLO11 twin on the same data to compare."
+          ) : (
+            "YOLO11: the previous generation (NMS head). Same tasks and sizes — compare it against a YOLO26 run."
+          )}
+        </p>
       </Section>
 
       <Section title="Model size" right={<span className="st-muted">params ≈ approx.</span>}>
@@ -389,7 +415,7 @@ function TrainForm({
               className={`st-train-size${effSize === s.value ? " on" : ""}`}
               disabled={kind === "model"}
               onClick={() => setSize(s.value)}
-              title={`${weightsName(task, s.value)} — ≈${s.params} parameters (approximate); ${s.hint}`}
+              title={`${weightsName(task, s.value, effFamily)} — ≈${s.params} parameters (approximate); ${s.hint}`}
             >
               <span className="st-train-size-letter">{s.value}</span>
               <span className="st-train-size-params">≈{s.params}</span>
@@ -429,8 +455,8 @@ function TrainForm({
               value: "pretrained",
               title: `Pretrained (${task === "obb" ? "DOTA" : "COCO"})`,
               blurb: isCached(effSize)
-                ? "Ultralytics YOLO26 weights — best for small datasets."
-                : `Ultralytics YOLO26 weights — ${weights}.pt downloads on first use.`,
+                ? `Ultralytics YOLO${effFamily} weights — best for small datasets.`
+                : `Ultralytics YOLO${effFamily} weights — ${weights}.pt downloads on first use.`,
             },
             { value: "scratch", title: "From scratch", blurb: "Random init — needs hundreds of epochs and lots of data." },
             {
@@ -482,7 +508,7 @@ function TrainForm({
             <input
               className="st-input"
               value={name}
-              placeholder={`yolo26${effSize}-${task} · ${cfg.epochs}ep`}
+              placeholder={`yolo${effFamily}${effSize}-${task} · ${cfg.epochs}ep`}
               onChange={(e) => setName(e.target.value)}
             />
           </Field>
@@ -982,7 +1008,7 @@ function ModelList({
                 </div>
                 <div className="st-train-model-meta">
                   <TaskBadge task={m.task} />
-                  <span>{weightsName(m.task, m.size)}</span>
+                  <span>{weightsName(m.task, m.size, familyOf(m))}</span>
                   <span>·</span>
                   <span className="st-ellipsis">{baseLabel(m, models, false)}</span>
                   <span>·</span>
@@ -1309,7 +1335,7 @@ function Facts({ m, models }: { m: TrainedModel; models: TrainedModel[] }) {
   return (
     <div className="st-train-facts">
       <Fact label="Model">
-        {TASK_LABEL[m.task]} · {weightsName(m.task, m.size)}
+        {TASK_LABEL[m.task]} · {weightsName(m.task, m.size, familyOf(m))}
       </Fact>
       <Fact label="Starting weights">{baseLabel(m, models, true)}</Fact>
       <Fact label="Schedule">
