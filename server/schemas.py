@@ -83,6 +83,8 @@ class ProjectSummaryModel(BaseModel):
     n_teacher_datasets: int = 0
     n_human_reviewed_datasets: int = 0
     n_students: int = 0
+    n_studio_images: int = 0
+    n_studio_models: int = 0
 
 
 class ProjectsResponse(BaseModel):

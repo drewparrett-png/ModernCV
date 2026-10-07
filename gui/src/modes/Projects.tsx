@@ -126,6 +126,12 @@ function ProjectCard({
           </span>
         )}
       </div>
+      {(project.n_studio_images ?? 0) > 0 && (
+        <div className="project-card-studio" title="YOLO26 Studio dataset and trained models">
+          Studio · {project.n_studio_images} image{project.n_studio_images === 1 ? "" : "s"} ·{" "}
+          {project.n_studio_models ?? 0} model{project.n_studio_models === 1 ? "" : "s"}
+        </div>
+      )}
 
       <div className="project-card-actions">
         <button type="button" className="project-card-open" onClick={onOpen}>

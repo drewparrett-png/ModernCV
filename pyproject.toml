@@ -25,6 +25,11 @@ dependencies = [
     "transformers>=4.45.0",      # GroundingDINO via IDEA-Research/grounding-dino-tiny
     "accelerate>=0.34.0",        # device placement / autocast helpers used by transformers
     "psutil>=5.9.0",             # Phase 6: RSS probe for the perf reproducer
+    "python-multipart>=0.0.9",   # Studio: image / depth uploads
+    "onnx>=1.16.0",              # Studio: ONNX export
+    "onnxslim>=0.1.40",          # Studio: ONNX graph simplification on export
+    "onnxruntime>=1.18.0",       # Studio: run / benchmark ONNX exports
+    "lap>=0.5.12",               # Studio: Ultralytics ByteTrack / BoT-SORT assignment
 ]
 
 [project.optional-dependencies]
@@ -61,6 +66,9 @@ select = ["E", "F", "I", "B", "UP"]
 #   # the cleanest path is:
 #   pip install "git+https://github.com/facebookresearch/dinov3.git"
 #   # (Or load via timm once an official entry lands; check before pinning.)
+#
+#   # YOLOE text prompts (YOLO26 Studio) need Ultralytics' CLIP fork:
+#   pip install "git+https://github.com/ultralytics/CLIP.git"
 #
 #   # ByteTrack reference impl (optional; a small in-tree version is cheap
 #   # to maintain and avoids the heavy YOLOX dep):

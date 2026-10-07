@@ -1,15 +1,17 @@
 /**
  * Top-level mode shell — the front door of the app.
  *
- * Two tabs: Learn (the simple wizard) and Optimize (distill from a Teacher
- * run). Optimize is disabled until at least one completed Teacher run
- * exists on disk.
+ * Three tabs: Learn (the simple wizard), Optimize (distill from a Teacher
+ * run) and Studio (YOLO26 image lab: prompt, label, train, test, Pal/DePal).
+ * Optimize is disabled until at least one completed Teacher run exists on
+ * disk; Studio is independent of the video pipeline.
  */
 
 import { useStore } from "../store";
 import type { Mode } from "../types";
 import { Learn } from "../modes/Learn";
 import { Optimize } from "../modes/Optimize";
+import { Studio } from "../studio/Studio";
 import { RunInspector } from "./RunInspector";
 
 interface TabDef {
@@ -21,6 +23,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { mode: "learn", label: "Learn", blurb: "Teach the system from scratch" },
   { mode: "optimize", label: "Optimize", blurb: "Distill a fast student" },
+  { mode: "studio", label: "Studio", blurb: "YOLO26 · prompt, train, test, pallets" },
 ];
 
 export function ModeShell() {
@@ -65,6 +68,7 @@ export function ModeShell() {
       <div className="mode-body">
         {mode === "learn" && <Learn />}
         {mode === "optimize" && <Optimize />}
+        {mode === "studio" && <Studio />}
       </div>
 
       {inspectingRunId && <RunInspector />}

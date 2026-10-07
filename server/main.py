@@ -78,6 +78,10 @@ from pipeline.student_run import (
     stop_student_run_worker,
 )
 from pipeline.students import list_trainers
+from pipeline.studio import track as studio_track
+from pipeline.studio import training as studio_training
+from pipeline.studio.store import studio_summary
+from server.studio import router as studio_router
 from server.schemas import (
     ArchitecturesResponse,
     BlockKindInfo,
@@ -132,9 +136,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     ensure_learn_worker_started()
     ensure_optimize_worker_started()
     ensure_student_run_worker_started()
+    recovered = studio_training.recover_jobs(runs_mod.RUNS_DIR)
+    if any(recovered.values()):
+        log.info("startup: Studio training jobs %s", recovered)
+    studio_training.ensure_worker_started()
+    tracks = studio_track.recover_jobs(runs_mod.RUNS_DIR)
+    if any(tracks.values()):
+        log.info("startup: Studio tracking jobs %s", tracks)
+    studio_track.ensure_worker_started()
     try:
         yield
     finally:
+        studio_track.stop_worker()
+        studio_training.stop_worker()
         stop_student_run_worker()
         stop_optimize_worker()
         stop_learn_worker()
@@ -148,6 +162,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# YOLO26 Studio — image datasets, prompting, training, Pal/DePal (server/studio.py).
+app.include_router(studio_router)
 
 
 # ---- Health / discovery ---------------------------------------------------
@@ -251,6 +268,7 @@ def list_projects_endpoint() -> ProjectsResponse:
     out: list[ProjectSummaryModel] = []
     for p in runs_mod.list_projects():
         counts = runs_mod.project_summary_counts(p.id)
+        counts.update(studio_summary(p.id))
         out.append(
             ProjectSummaryModel(
                 id=p.id,
