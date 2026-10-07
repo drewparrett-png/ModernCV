@@ -850,6 +850,9 @@ def preview_buckets(
                 detail=f"teacher {tid!r} coco.json is malformed: {e}",
             )
 
+        frame_states = runs_mod.read_frame_states(tdir)
+        distill._apply_frame_state_overrides(coco, frame_states)
+
         buckets = distill.classify_frames(
             coco, export_threshold=req.export_threshold, t_low=req.t_low,
         )
