@@ -198,7 +198,7 @@ export const fetchModels = (pid: string) => get<{ models: TrainedModel[] }>(`${S
 export const fetchModel = (pid: string, mid: string) => get<TrainedModel>(`${S(pid)}/models/${enc(mid)}`);
 export const startTraining = (
   pid: string,
-  body: { task: string; size: string; base: string; name?: string; config: Partial<TrainConfig> },
+  body: { task: string; size: string; family?: string; base: string; name?: string; config: Partial<TrainConfig> },
 ) => post<TrainedModel>(`${S(pid)}/models`, body);
 export const cancelModel = (pid: string, mid: string) => post<TrainedModel>(`${S(pid)}/models/${enc(mid)}/cancel`, {});
 export const deleteModel = (pid: string, mid: string) => del<{ deleted: string }>(`${S(pid)}/models/${enc(mid)}`);

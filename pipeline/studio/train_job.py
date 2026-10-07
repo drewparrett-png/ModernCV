@@ -43,10 +43,11 @@ def main(mdir: Path) -> int:
         from ultralytics import YOLO
 
         prog(stage="starting", epoch=0, epochs=cfg["epochs"], message="loading model and dataset")
+        family = str(m.get("family") or "26")
         if base == "pretrained":
-            weights = str(engines.ensure_weights(engines.yolo26_name(task, size)))
+            weights = str(engines.ensure_weights(engines.yolo_name(family, task, size)))
         elif base == "scratch":
-            weights = f"yolo26{size}{engines.TASK_SUFFIX[task]}.yaml"
+            weights = f"yolo{family}{size}{engines.TASK_SUFFIX[task]}.yaml"
         else:
             weights = str(mdir.parent / base[len("model:"):] / "best.pt")
         model = YOLO(weights, task=task)

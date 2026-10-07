@@ -112,13 +112,15 @@ export interface SamResult {
 
 export type Scope = "image" | "unlabeled" | "all" | "ids";
 export type YoloeFamily = "26" | "11";
+/** Closed-vocabulary YOLO families (YOLO26 default; YOLO11 for comparison). */
+export type YoloFamily = "26" | "11";
 export type YoloeSize = "s" | "m" | "l";
 export type YoloTask = "detect" | "segment" | "classify" | "pose" | "obb";
 export type YoloSize = "n" | "s" | "m" | "l" | "x";
 export type TrainTask = "detect" | "segment" | "obb";
 
 export type ModelSpec =
-  | { kind: "yolo26"; task: YoloTask; size: YoloSize }
+  | { kind: "yolo"; family: YoloFamily; task: YoloTask; size: YoloSize }
   | { kind: "trained"; model_id: string; artifact?: string }
   | { kind: "yoloe-text"; family: YoloeFamily; size: YoloeSize; classes: string[] }
   | { kind: "yoloe-pf"; family: YoloeFamily; size: YoloeSize };
@@ -161,7 +163,7 @@ export interface Prediction {
 
 export interface Catalog {
   device: string;
-  yolo26: Record<YoloTask, { size: YoloSize; weights: string; cached: boolean }[]>;
+  yolo: Record<YoloFamily, Record<YoloTask, { size: YoloSize; weights: string; cached: boolean }[]>>;
   yoloe: { family: YoloeFamily; size: YoloeSize; weights: string; cached: boolean; pf_cached: boolean }[];
   sam: { id: string; label: string; cached: boolean }[];
   depth: { id: string; label: string }[];
@@ -235,6 +237,8 @@ export interface TrainedModel {
   name: string;
   task: TrainTask;
   size: YoloSize;
+  /** Absent on models trained before YOLO11 support — those are YOLO26. */
+  family?: YoloFamily;
   base: string;
   base_weights: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";

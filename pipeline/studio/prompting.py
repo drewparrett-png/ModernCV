@@ -423,6 +423,7 @@ def detect_to_suggestions(
     source = {
         "yoloe-text": f"yoloe-{spec.get('family', '26')}{spec.get('size', 's')}:text",
         "yoloe-pf": f"yoloe-{spec.get('family', '26')}{spec.get('size', 's')}:prompt-free",
+        "yolo": f"yolo{spec.get('family', '26')}{spec.get('size', 'n')}-{spec.get('task', 'detect')}",
         "yolo26": f"yolo26{spec.get('size', 'n')}-{spec.get('task', 'detect')}",
         "trained": f"model:{spec.get('model_id')}",
     }.get(str(spec.get("kind")), str(spec.get("kind")))

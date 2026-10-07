@@ -64,8 +64,10 @@ def start_track(store: StudioStore, req: dict) -> dict:
     if tracker not in TRACKERS:
         raise Invalid(f"tracker must be one of {TRACKERS}")
     spec = req.get("model") or {}
-    if spec.get("kind") not in ("yolo26", "trained", "yoloe-text"):
-        raise Invalid("tracking needs a YOLO26, trained or YOLOE text-prompt model")
+    if spec.get("kind") not in ("yolo", "yolo26", "trained", "yoloe-text"):
+        raise Invalid("tracking needs a YOLO26 / YOLO11, trained or YOLOE text-prompt model")
+    if spec.get("kind") in ("yolo", "yolo26") and spec.get("task") == "classify":
+        raise Invalid("classifiers don't output boxes to track — pick detect, segment, pose or OBB")
     line = req.get("count_line")
     if line is not None:
         if line.get("axis") not in ("x", "y") or not (0.0 < float(line.get("pos", -1)) < 1.0):
@@ -202,8 +204,9 @@ def _load_track_model(store: StudioStore, spec: dict) -> Any:
     from ultralytics import YOLO, YOLOE
 
     kind = spec["kind"]
-    if kind == "yolo26":
-        return YOLO(str(engines.ensure_weights(engines.yolo26_name(spec.get("task", "detect"), spec.get("size", "n")))))
+    if kind in ("yolo", "yolo26"):
+        name = engines.yolo_name(engines.spec_family(spec), spec.get("task", "detect"), spec.get("size", "n"))
+        return YOLO(str(engines.ensure_weights(name)))
     if kind == "trained":
         p = store.models_dir / check_id(str(spec.get("model_id")), "model id") / "best.pt"
         if not p.exists():
@@ -212,6 +215,17 @@ def _load_track_model(store: StudioStore, spec: dict) -> Any:
     model = YOLOE(str(engines.ensure_weights(engines.yoloe_name(str(spec.get("family", "26")), str(spec.get("size", "s"))))))
     engines.yoloe_set_text_classes(model, [str(c) for c in spec.get("classes") or []] or ["object"])
     return model
+
+
+def _is_yolo26(store: StudioStore, spec: dict) -> bool:
+    """Only YOLO26 checkpoints accept the `end2end` head switch."""
+    kind = spec.get("kind")
+    if kind in ("yolo", "yolo26"):
+        return engines.spec_family(spec) == "26"
+    if kind == "trained":
+        mfile = store.models_dir / check_id(str(spec.get("model_id")), "model id") / "model.json"
+        return mfile.exists() and str(json.loads(mfile.read_text()).get("family") or "26") == "26"
+    return False
 
 
 class _Writer:
@@ -274,7 +288,7 @@ def _run(store: StudioStore, tdir: Path) -> None:
 
     with engines.INFER_LOCK:
         model = _load_track_model(store, m["model"])
-    kw = predict_kwargs(m["params"], allow_end2end=m["model"]["kind"] != "yoloe-text")
+    kw = predict_kwargs(m["params"], allow_end2end=_is_yolo26(store, m["model"]))
     kw["persist"] = True
     kw["tracker"] = f"{m['tracker']}.yaml"
 

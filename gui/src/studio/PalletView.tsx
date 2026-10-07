@@ -55,7 +55,7 @@ interface Settings {
 
 const DEFAULTS: Settings = {
   instKind: "annotations",
-  modelSpec: { kind: "yolo26", task: "segment", size: "n" },
+  modelSpec: { kind: "yolo", family: "26", task: "segment", size: "n" },
   modelConf: 0.25,
   depthSource: "auto",
   depthModel: "da2-metric-indoor-b",
@@ -135,7 +135,7 @@ export function PalletView() {
   // have no carton class) as soon as one exists.
   const newestSeg = models.find((m) => m.status === "completed" && m.task === "segment");
   useEffect(() => {
-    if (newestSeg && modelSpec.kind === "yolo26") setModelSpec({ kind: "trained", model_id: newestSeg.id });
+    if (newestSeg && modelSpec.kind === "yolo") setModelSpec({ kind: "trained", model_id: newestSeg.id });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newestSeg?.id]);
 
@@ -349,7 +349,7 @@ export function PalletView() {
           />
           {instKind === "predict" && (
             <>
-              <ModelPicker value={modelSpec} onChange={setModelSpec} models={models} catalog={catalog} kinds={["trained", "yolo26", "yoloe-text"]} tasks={["segment", "detect"]} />
+              <ModelPicker value={modelSpec} onChange={setModelSpec} models={models} catalog={catalog} kinds={["trained", "yolo", "yoloe-text"]} tasks={["segment", "detect"]} />
               <Slider label="Conf" value={modelConf} min={0.02} max={0.9} step={0.01} onChange={setModelConf} format={(v) => v.toFixed(2)} />
             </>
           )}

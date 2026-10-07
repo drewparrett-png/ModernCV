@@ -92,13 +92,15 @@ ModernCV/
 ## YOLO26 Studio
 
 A Roboflow-style image lab inside every project (**Studio** tab), built on
-Ultralytics YOLO26. Design notes: `docs/superpowers/specs/2026-10-07-yolo26-studio-design.md`.
+Ultralytics YOLO26, with YOLO11 available side by side for comparison (pick the
+family in any model picker or in the Train form). Design notes:
+`docs/superpowers/specs/2026-10-07-yolo26-studio-design.md`.
 
 | Sub-tab | What it does |
 |---|---|
 | **Label** | Draw **boxes** or paint **brush strokes** (⌥ / Erase = negative). **Segment** (SAM 2.1, live preview, part/object/whole granularity) turns the draft into one precise mask; **Find similar** (YOLOE visual prompt) finds every similar object here or across the dataset; **Add as label** uses the painted pixels directly. Also text prompts, prompt-free YOLOE, model assist, and "find more like my labels". Everything lands as reviewable suggestions. |
-| **Train** | YOLO26 detect / segment / OBB, sizes n–x, pretrained / scratch / fine-tune, augmentation controls, live curves; jobs run one at a time in a subprocess (cancellable). |
-| **Test** | Predict playground for all five YOLO26 tasks (detect, segment, classify, pose, OBB) plus YOLOE text / prompt-free, NMS-free vs NMS head, TTA; validation, export (ONNX, TorchScript, CoreML…), latency benchmark, and video tracking (ByteTrack / BoT-SORT) with a conveyor counting line. |
+| **Train** | YOLO26 or YOLO11 detect / segment / OBB, sizes n–x, pretrained / scratch / fine-tune, augmentation controls, live curves; jobs run one at a time in a subprocess (cancellable). |
+| **Test** | Predict playground for all five tasks (detect, segment, classify, pose, OBB) with YOLO26 or YOLO11, plus YOLOE text / prompt-free, NMS-free vs NMS head (YOLO26), TTA; validation, export (ONNX, TorchScript, CoreML…), latency benchmark, and video tracking (ByteTrack / BoT-SORT) with a conveyor counting line. |
 | **Pallet** | Pal/DePal analysis: carton masks + depth → reference plane, per-carton height, top-face size and yaw, layers, pick order, blocked/hidden cartons. Depth from an uploaded RGB-D map (16-bit PNG mm / `.npy` m) or monocular Depth Anything V2. |
 
 Keyboard (Label): `B` box · `P` brush · `E` erase · `V` select · `H`/Space pan ·
@@ -121,6 +123,10 @@ What we measured (details in the spec):
   M4) + RGB-D depth measured every detected carton on unseen pallets to within
   0.2 mm, with correct layers. At this data size recall (~0.5) is the limit, not
   the geometry — label more images.
+* **YOLO26 vs YOLO11:** on the same 38 synthetic pallet images, YOLO11n-seg beat
+  YOLO26n-seg (mask mAP50 0.60 vs 0.50; 22 vs 9 cartons found on three held-out
+  pallets) at the same CPU latency. One small run each — compare both on your own
+  images with the family switch.
 * **Monocular depth gives ordering, not measurements:** ~17 cm mean height error,
   rank correlation ~0.9 with a known camera height. Use an RGB-D camera for real
   Pal/DePal decisions.

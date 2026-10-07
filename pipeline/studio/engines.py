@@ -1,4 +1,4 @@
-"""Model handles for Studio: YOLO26, YOLOE-26, SAM 2.1 and Depth Anything V2.
+"""Model handles for Studio: YOLO26 / YOLO11, YOLOE, SAM 2.1 and Depth Anything V2.
 
 Everything heavy is imported lazily so `import pipeline.studio` stays cheap
 for the API process and the test suite.
@@ -75,12 +75,39 @@ def missing_dep(module: str) -> Optional[str]:
     return f"{purpose} needs the '{module}' package: uv pip install --python .venv/bin/python \"{spec}\""
 
 
-def yolo26_name(task: str, size: str) -> str:
+# Closed-vocabulary YOLO families Studio can predict with and train from.
+# YOLO26 is the default (NMS-free end-to-end head); YOLO11 is offered for
+# side-by-side comparison — it uses the classic one-to-many head + NMS.
+YOLO_FAMILIES = ("26", "11")
+
+
+def yolo_name(family: str, task: str, size: str) -> str:
+    """Release asset name, e.g. ("11", "segment", "n") → "yolo11n-seg.pt"."""
+    if family not in YOLO_FAMILIES:
+        raise ValueError(f"unknown YOLO family {family!r} (choose from {YOLO_FAMILIES})")
     if task not in TASK_SUFFIX:
         raise ValueError(f"unknown task {task!r}")
     if size not in SIZES:
         raise ValueError(f"unknown size {size!r}")
-    return f"yolo26{size}{TASK_SUFFIX[task]}.pt"
+    return f"yolo{family}{size}{TASK_SUFFIX[task]}.pt"
+
+
+def yolo26_name(task: str, size: str) -> str:
+    return yolo_name("26", task, size)
+
+
+def spec_family(spec: dict) -> str:
+    """YOLO family of a pretrained-model spec.
+
+    `{"kind": "yolo", "family": …}` is current; `{"kind": "yolo26"}` is the
+    original spelling, still found in saved tracking jobs.
+    """
+    if spec.get("kind") == "yolo26":
+        return "26"
+    fam = str(spec.get("family") or "26")
+    if fam not in YOLO_FAMILIES:
+        raise ValueError(f"unknown YOLO family {fam!r} (choose from {YOLO_FAMILIES})")
+    return fam
 
 
 # Open-vocabulary YOLOE comes in two families. YOLOE-26 is the YOLO26-based
@@ -427,8 +454,11 @@ def estimate_depth_m(image_bgr: np.ndarray, key: str = "da2-metric-indoor-s") ->
 def catalog() -> dict:
     """What the GUI can offer, and which weights are already on disk."""
     yolo = {
-        task: [{"size": s, "weights": yolo26_name(task, s), "cached": is_cached(yolo26_name(task, s))} for s in SIZES]
-        for task in TASKS
+        fam: {
+            task: [{"size": s, "weights": yolo_name(fam, task, s), "cached": is_cached(yolo_name(fam, task, s))} for s in SIZES]
+            for task in TASKS
+        }
+        for fam in YOLO_FAMILIES
     }
     yoloe = [
         {
@@ -444,4 +474,4 @@ def catalog() -> dict:
     sam = [{"id": k, "label": v, "cached": is_cached(f"{k}.pt")} for k, v in SAM_MODELS.items()]
     depth = [{"id": k, "label": v[1]} for k, v in DEPTH_MODELS.items()]
     deps = {m: missing_dep(m) for m in OPTIONAL_DEPS}
-    return {"device": device(), "yolo26": yolo, "yoloe": yoloe, "sam": sam, "depth": depth, "missing_deps": deps}
+    return {"device": device(), "yolo": yolo, "yoloe": yoloe, "sam": sam, "depth": depth, "missing_deps": deps}

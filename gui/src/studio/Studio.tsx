@@ -3,8 +3,8 @@
  *
  *   Label   prompt with boxes / brush strokes → SAM masks, YOLOE "find
  *           similar", text / prompt-free / model auto-labelling, review.
- *   Train   YOLO26 detect / segment / OBB with live curves.
- *   Test    predict playground for every YOLO26 task + val / export /
+ *   Train   YOLO26 / YOLO11 detect / segment / OBB with live curves.
+ *   Test    predict playground for every YOLO task + val / export /
  *           benchmark / video tracking.
  *   Pallet  Pal/DePal: carton masks + depth → heights, layers, pick order.
  */
@@ -20,7 +20,7 @@ import "./studio.css";
 
 const TABS: { id: StudioTab; label: string; blurb: string }[] = [
   { id: "label", label: "Label", blurb: "Prompt · segment · review" },
-  { id: "train", label: "Train", blurb: "YOLO26 detect / seg / OBB" },
+  { id: "train", label: "Train", blurb: "YOLO26 / YOLO11 · detect, seg, OBB" },
   { id: "test", label: "Test", blurb: "Predict · val · export · track" },
   { id: "pallet", label: "Pallet", blurb: "Pal/DePal heights & layers" },
 ];
