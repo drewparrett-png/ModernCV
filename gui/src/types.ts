@@ -78,6 +78,9 @@ export interface ProjectSummary extends Project {
   n_teacher_datasets: number;
   n_human_reviewed_datasets: number;
   n_students: number;
+  /** YOLO26 Studio: images in the dataset and completed trained models. */
+  n_studio_images?: number;
+  n_studio_models?: number;
 }
 
 export interface ProjectsResponse {
@@ -92,7 +95,7 @@ export interface ProjectCreateRequest {
 
 // ---- Modes / Learn / Runs ------------------------------------------------
 
-export type Mode = "learn" | "optimize";
+export type Mode = "learn" | "optimize" | "studio";
 
 /** Project-scoped Learn request (Phase 1). `task` and `prompts` come from
  *  the parent project, NOT from this body. Phase 2 dropped the per-run
